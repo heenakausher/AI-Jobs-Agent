@@ -65,6 +65,11 @@ jobs:
             echo "client_secret.json restored from secret"
           fi
 
+      # ── Restore CV ──────────────────────────────────────────────────
+      - name: Restore CV
+        run: |
+          echo '${{ secrets.CV_TEXT }}' > enhanced_cv.txt
+
       # ── Scrape jobs from all sources ────────────────────────────────
       - name: Scrape Naukri jobs
         run: python main.py --fetch-naukri --only-naukri
