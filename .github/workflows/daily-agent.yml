@@ -54,21 +54,21 @@ jobs:
       # ── Restore Google OAuth credentials ────────────────────────────
       - name: Restore Google OAuth credentials
         run: |
-          # Reconstruct token.json from GitHub secret
-          if [ -n "${{ secrets.GOOGLE_TOKEN_JSON }}" ]; then
-            echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
-            echo "token.json restored from secret"
-          fi
-          # Reconstruct client_secret.json from GitHub secret
-          if [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]; then
-            echo '${{ secrets.GOOGLE_CLIENT_SECRET }}' > client_secret.json
-            echo "client_secret.json restored from secret"
+          if [ -n "${{ secrets.GOOGLE_TOKEN_JSON_BASE64 }}" ]; then
+            echo "${{ secrets.GOOGLE_TOKEN_JSON_BASE64 }}" | base64 -d > token.json
+            echo "✓ token.json restored"
           fi
 
-      # ── Restore CV ──────────────────────────────────────────────────
+          if [ -n "${{ secrets.GOOGLE_CLIENT_SECRET_BASE64 }}" ]; then
+            echo "${{ secrets.GOOGLE_CLIENT_SECRET_BASE64 }}" | base64 -d > client_secret.json
+            echo "✓ client_secret.json restored"
+          fi
+
+      # ── Restore CV ───────────────────────────────────────────────────
       - name: Restore CV
         run: |
-          echo '${{ secrets.CV_TEXT }}' > enhanced_cv.txt
+          echo "${{ secrets.CV_TEXT_BASE64 }}" | base64 -d > enhanced_cv.txt
+          echo "✓ enhanced_cv.txt restored"
 
       # ── Scrape jobs from all sources ────────────────────────────────
       - name: Scrape Naukri jobs
