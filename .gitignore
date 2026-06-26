@@ -1,0 +1,30 @@
+#folders
+.agents/
+testenv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+Heena Kausher_CV.PDF
+
+# Google OAuth (keep template, ignore actual secrets)
+client_secret.json
+token.json
+auth_state.json
+
+# Output & runtime data
+outputs/
+agent.log
+generation_progress.json
+score_cache.json
+
+# OS
+.DS_Store
+Thumbs.db
+test_cv.docx
+enhanced_cv.txt
+reformat_cv.py
