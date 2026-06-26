@@ -102,13 +102,29 @@ jobs:
             generation_progress.json
           key: agent-cache-${{ github.run_id }}
 
+      - name: Show generated files
+        if: always()
+        run: |
+          echo "Current directory:"
+          pwd
+
+          echo ""
+          echo "Project files:"
+          ls -la
+
+          echo ""
+          echo "Outputs:"
+          find outputs || true
+
+
       # ── Upload generated files as artifact ──────────────────────────
       - name: Upload generated outputs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: generated-files-${{ github.run_id }}
-          path: outputs/
-          if-no-files-found: warn
+          path: outputs/**
+          if-no-files-found: ignore
 
       # ── Commit updated cache back to repository ─────────────────────
       - name: Commit cache updates back to repo
