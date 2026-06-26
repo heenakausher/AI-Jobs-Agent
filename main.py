@@ -3,12 +3,15 @@ import logging
 import os
 import re
 import sys
+import time
 import urllib.request
 import urllib.error
 import datetime
 from groq_api import query_groq
 import naukri_scraper
 import indeed_scraper
+import linkedin_scraper
+import auto_scorer
 
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -21,6 +24,20 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("agent")
+
+_start_time = None
+
+def timer_start():
+    global _start_time
+    _start_time = time.time()
+
+def timer_elapsed() -> str:
+    if _start_time is None:
+        return "0s"
+    elapsed = time.time() - _start_time
+    if elapsed < 60:
+        return f"{elapsed:.1f}s"
+    return f"{elapsed // 60:.0f}m {elapsed % 60:.0f}s"
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -33,7 +50,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as AuthRequest
 
 # ── Paths & config ─────────────────────────────────────────────────────────────
-JOBS_JSON = "all_roles_hyderabad.json"
+JOBS_JSON = "processed_jobs.json"
 CV_FILE = "enhanced_cv.txt"
 SCORE_CACHE = "score_cache.json"
 PROGRESS_FILE = "generation_progress.json"
@@ -43,6 +60,8 @@ TOKEN_FILE = "token.json"
 SHEET_ID = "1debuNPIgf0hYPIaUyLy42IARIXaNE46Gxp9hB50Y8H0"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MODEL = "llama-3.1-8b-instant"
+
+OUTPUT_DATE_DIR = os.path.join(OUTPUT_DIR, datetime.date.today().strftime("%Y-%m-%d"))
 
 # ── Groq prompts ───────────────────────────────────────────────────────────────
 CUSTOMIZE_SYSTEM_PROMPT = """You are an expert ATS optimization specialist and career coach.
@@ -170,21 +189,38 @@ def get_sheets_token() -> str:
     return creds.token
 
 
-def append_sheet_row(token: str, row: list):
+def append_sheet_row(token: str, row: list, max_retries: int = 3):
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/A:G:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
     body = json.dumps({"values": [row]}).encode()
-    req = urllib.request.Request(
-        url, data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-    )
-    try:
-        urllib.request.urlopen(req, timeout=30)
-        log.info("  Sheet row appended.")
-    except urllib.error.HTTPError as e:
-        log.error("  Sheet append error: %s %s", e.code, e.read().decode()[:200])
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                url, data=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                }
+            )
+            urllib.request.urlopen(req, timeout=30)
+            log.info("  Sheet row appended.")
+            return
+        except urllib.error.HTTPError as e:
+            body_text = e.read().decode()[:200]
+            if e.code in (429, 500, 502, 503) and attempt < max_retries:
+                wait = attempt * 5
+                log.warning("  Sheet API error %s, retrying in %ss: %s", e.code, wait, body_text)
+                time.sleep(wait)
+                continue
+            log.error("  Sheet append error: %s %s", e.code, body_text)
+            return
+        except urllib.error.URLError as e:
+            if attempt < max_retries:
+                wait = attempt * 5
+                log.warning("  Sheet network error, retrying in %ss: %s", wait, e)
+                time.sleep(wait)
+                continue
+            log.error("  Sheet network error: %s", e)
+            return
 
 
 # ── Groq generation ────────────────────────────────────────────────────────────
@@ -912,6 +948,30 @@ def save_pdf(text: str, path: str):
     pdf.output(path)
 
 
+# ── Output migration ──────────────────────────────────────────────────────────
+
+def migrate_outputs_to_dated_dirs():
+    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if not os.path.isdir(OUTPUT_DIR):
+        return
+    for name in os.listdir(OUTPUT_DIR):
+        path = os.path.join(OUTPUT_DIR, name)
+        if not os.path.isdir(path) or date_pattern.match(name):
+            continue
+        if name.startswith("."):
+            continue
+        mtime = os.path.getmtime(path)
+        date_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        target = os.path.join(OUTPUT_DIR, date_str, name)
+        parent = os.path.dirname(target)
+        os.makedirs(parent, exist_ok=True)
+        if not os.path.exists(target):
+            os.rename(path, target)
+            log.info("  Moved outputs/%s -> outputs/%s/%s", name, date_str, name)
+        else:
+            log.warning("  Skip move outputs/%s -> %s (target exists)", name, target)
+
+
 # ── Job processing ─────────────────────────────────────────────────────────────
 
 def process_job(job: dict, cv_text: str, output_base: str) -> tuple:
@@ -937,55 +997,94 @@ def process_job(job: dict, cv_text: str, output_base: str) -> tuple:
     return True, prep_text, chance_num, folder_name
 
 
+# ── Scraper helpers ─────────────────────────────────────────────────────────
+
+def run_scraper_for_locations(scraper_module, name: str, pages: int = 2, locations: list = None):
+    total_jobs = []
+    total_new = 0
+    if locations is None:
+        locations = ["Hyderabad", "Pune"]
+    for loc in locations:
+        log.info("Fetching %s jobs from '%s'...", name, loc)
+        added = 0
+        try:
+            jobs = scraper_module.fetch_all(location=loc, pages_per_search=pages)
+            if jobs:
+                scraper_module.save_jobs(jobs)
+                added = scraper_module.merge_into_all_roles(jobs)
+                total_jobs.extend(jobs)
+                total_new += added
+            else:
+                jobs = []
+            log.info("  %s: %s jobs, %s new", loc, len(jobs), added)
+        except Exception as e:
+            log.error("  %s scraper failed for %s: %s", name, loc, e)
+    return total_jobs, total_new
+
+
+def log_scraper_results(name: str, jobs: list, added: int):
+    log.info("=" * 80)
+    log.info("Fetched %s total jobs from %s, %s new.", len(jobs), name, added)
+    if added > 0:
+        for j in jobs[-10:]:
+            log.info("  %s @ %s [%s]", j["title"], j["company"], j.get("category", "N/A"))
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    location = "Hyderabad"
+    timer_start()
+
+    migrate_outputs_to_dated_dirs()
+
+    locations = ["Hyderabad", "Pune"]
     for i, arg in enumerate(sys.argv):
         if arg == "--location" and i + 1 < len(sys.argv):
-            location = sys.argv[i + 1]
+            locations = [sys.argv[i + 1]]
 
     any_fetch = False
     only_mode = False
 
+    # ── Naukri ──────────────────────────────────────────────────────────
     if "--fetch-naukri" in sys.argv:
         any_fetch = True
-        log.info("Fetching jobs from Naukri.com...")
-        jobs = naukri_scraper.fetch_all(location=location, pages_per_search=2)
-        naukri_scraper.save_jobs(jobs)
-        added = naukri_scraper.merge_into_all_roles(jobs)
-
-        log.info("=" * 80)
-        log.info("Fetched %s total jobs from Naukri, %s new.", len(jobs), added)
-        if added > 0:
-            log.info("New jobs added to %s. Add scores to %s to include them.", naukri_scraper.ALL_ROLES_FILE, SCORE_CACHE)
-            for j in jobs[-10:]:
-                log.info("  %s @ %s [%s]", j["title"], j["company"], j["category"])
+        jobs, added = run_scraper_for_locations(naukri_scraper, "Naukri", locations=locations)
+        log_scraper_results("Naukri", jobs, added)
         if "--only-naukri" in sys.argv:
             only_mode = True
 
+    # ── Indeed ──────────────────────────────────────────────────────────
     if "--fetch-indeed" in sys.argv:
         any_fetch = True
-        log.info("Fetching jobs from Indeed.com...")
-        jobs = indeed_scraper.fetch_all(location=location, pages_per_search=2)
-        indeed_scraper.save_jobs(jobs)
-        added = indeed_scraper.merge_into_all_roles(jobs)
-
-        log.info("=" * 80)
-        log.info("Fetched %s total jobs from Indeed, %s new.", len(jobs), added)
-        if added > 0:
-            log.info("New jobs added to %s. Add scores to %s to include them.", indeed_scraper.ALL_ROLES_FILE, SCORE_CACHE)
-            for j in jobs[-10:]:
-                log.info("  %s @ %s [%s]", j["title"], j["company"], j["category"])
+        jobs, added = run_scraper_for_locations(indeed_scraper, "Indeed", locations=locations)
+        log_scraper_results("Indeed", jobs, added)
         if "--only-indeed" in sys.argv:
+            only_mode = True
+
+    # ── LinkedIn ────────────────────────────────────────────────────────
+    if "--fetch-linkedin" in sys.argv:
+        any_fetch = True
+        jobs, added = run_scraper_for_locations(linkedin_scraper, "LinkedIn", locations=locations)
+        log_scraper_results("LinkedIn", jobs, added)
+        if "--only-linkedin" in sys.argv:
             only_mode = True
 
     if any_fetch and only_mode:
         log.info("Only-mode set. Exiting after fetch.")
+        log.info("Execution time: %s", timer_elapsed())
         return
 
     if any_fetch and not only_mode:
         log.info("Continuing with full pipeline...\n")
+
+    # ── Auto-score ──────────────────────────────────────────────────────
+    if "--auto-score" in sys.argv:
+        log.info("Running auto-scorer on unscored jobs...")
+        try:
+            added_scores = auto_scorer.score_all_unscored()
+            log.info("Auto-scored %s new jobs.", added_scores)
+        except Exception as e:
+            log.error("Auto-scorer failed: %s", e)
 
     cv_text = load_cv(CV_FILE)
     log.info("CV loaded (%s chars)", len(cv_text))
@@ -996,28 +1095,36 @@ def main():
     good = [r for r in scored if isinstance(r['score'], int) and r['score'] > 6]
     good.sort(key=lambda x: x['score'], reverse=True)
 
-    log.info("RECOMMENDED JOBS (score > 6):")
+    log.info("=" * 80)
+    log.info("RECOMMENDED JOBS (score > 6): %s total", len(good))
     log.info("%-3s %-5s %-16s %-40s %-22s", "#", "Score", "Category", "Job Title", "Company")
     log.info("%s", "-" * 86)
     for i, r in enumerate(good, 1):
         cat = r.get('category', 'N/A')[:14]
         log.info("%-3s %-3s/10 %-16s %-37s %-20s", i, r['score'], cat, r['title'][:37], r['company'][:20])
     log.info("%s", "-" * 86)
+    log.info("=" * 80)
 
+    # ── Google Sheets auth ──────────────────────────────────────────────
     log.info("Getting Google Sheets token...")
-    sheets_token = get_sheets_token()
-    log.info("  Sheets token ready.")
+    sheets_token = None
+    try:
+        sheets_token = get_sheets_token()
+        log.info("  Sheets token ready.")
+    except Exception as e:
+        log.warning("  Sheets auth failed (will skip uploads): %s", e)
 
     log.info("Generating tailored CVs & cover letters for %s jobs...", len(good))
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DATE_DIR, exist_ok=True)
 
     with open(JOBS_JSON, "r", encoding="utf-8") as f:
         all_jobs = json.load(f)
 
     job_map = {}
     for job in all_jobs:
-        key = (job["title"], job["company"])
+        key = (job.get("title", ""), job.get("company", ""))
         job_map[key] = job
 
     progress = load_progress(PROGRESS_FILE)
@@ -1040,7 +1147,13 @@ def main():
             continue
 
         log.info("[%s/%s] (%s) %s @ %s [Score: %s/10]", i, len(good), r['category'], r['title'], r['company'], r['score'])
-        ok, prep_text, chance_num, _ = process_job(job, cv_text, OUTPUT_DIR)
+        try:
+            ok, prep_text, chance_num, _ = process_job(job, cv_text, OUTPUT_DATE_DIR)
+        except Exception as e:
+            log.error("  UNEXPECTED ERROR: %s", e)
+            ok = False
+            prep_text = None
+            chance_num = None
 
         if ok:
             match_pct = r['score'] * 10
@@ -1055,7 +1168,13 @@ def main():
                 today
             ]
             log.info("  Appending to Google Sheet...")
-            append_sheet_row(sheets_token, row)
+            if sheets_token:
+                try:
+                    append_sheet_row(sheets_token, row)
+                except Exception as e:
+                    log.error("  Failed to append sheet row: %s", e)
+            else:
+                log.warning("  Skipping sheet append (no token).")
             progress[job_key] = {"status": "done"}
             completed += 1
         else:
@@ -1064,9 +1183,18 @@ def main():
         save_progress(PROGRESS_FILE, progress)
         print()
 
+    elapsed = timer_elapsed()
     log.info("=" * 80)
-    log.info("SUMMARY: %s completed, %s failed, %s skipped", completed, failed, skipped)
-    log.info("Outputs in '%s/'", OUTPUT_DIR)
+    log.info("FINAL SUMMARY")
+    log.info("  Jobs scored:      %s", len(scored))
+    log.info("  Jobs to process:  %s", len(good))
+    log.info("  CVs generated:    %s", completed)
+    log.info("  Cover letters:    %s", completed)
+    log.info("  Skipped (done):   %s", skipped)
+    log.info("  Failed:           %s", failed)
+    log.info("  Sheets uploads:   %s", completed if sheets_token else 0)
+    log.info("  Execution time:   %s", elapsed)
+    log.info("  Output dir:       %s/", OUTPUT_DATE_DIR)
     log.info("=" * 80)
 
 

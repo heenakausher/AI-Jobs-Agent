@@ -23,18 +23,24 @@ HEADERS = {
 
 INDEED_SEARCHES = [
     {"keyword": "Data Analyst", "category": "data_analyst"},
+    {"keyword": "Business Analyst", "category": "data_analyst"},
     {"keyword": "Business Intelligence", "category": "data_analyst"},
     {"keyword": "Data Analytics", "category": "data_analyst"},
+    {"keyword": "Power BI", "category": "data_analyst"},
     {"keyword": "Financial Analyst", "category": "finance_roles"},
     {"keyword": "Finance", "category": "finance_roles"},
+    {"keyword": "SAP FICO", "category": "finance_roles"},
     {"keyword": "Agentic AI", "category": "agentic_ai"},
     {"keyword": "AI Engineer", "category": "agentic_ai"},
     {"keyword": "Machine Learning", "category": "agentic_ai"},
+    {"keyword": "GenAI", "category": "agentic_ai"},
+    {"keyword": "LLM", "category": "agentic_ai"},
+    {"keyword": "RAG", "category": "agentic_ai"},
     {"keyword": "AI Intern", "category": "fresher_ai_ml"},
     {"keyword": "Finance Intern", "category": "fresher_ai_ml"},
 ]
 
-ALL_ROLES_FILE = "all_roles_hyderabad.json"
+ALL_ROLES_FILE = "processed_jobs.json"
 INDEED_OUTPUT = "indeed_jobs.json"
 
 

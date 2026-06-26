@@ -60,7 +60,7 @@ cmd_setup() {
 
     # Check for required files
     local missing=0
-    for f in enhanced_cv.txt all_roles_hyderabad.json score_cache.json; do
+    for f in enhanced_cv.txt processed_jobs.json score_cache.json; do
         if [ ! -f "$f" ]; then
             log "WARNING: Missing $f"
             missing=1

@@ -19,12 +19,14 @@ auth_state.json
 # Output & runtime data
 outputs/
 agent.log
-generation_progress.json
-score_cache.json
 
 # OS
 .DS_Store
 Thumbs.db
 test_cv.docx
-enhanced_cv.txt
 reformat_cv.py
+
+enhanced_cv.txt
+generation_progress.json
+score_cache.json
+processed_jobs.json

@@ -3,39 +3,114 @@ name: Daily AI Job Agent
 on:
   schedule:
     - cron: "0 3 * * *"   # Runs every day at 03:00 UTC
-  workflow_dispatch:
+  workflow_dispatch:       # Allows manual trigger
+
+env:
+  GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Persist credentials so the auto-commit step can push back
+          persist-credentials: true
 
-      - name: Setup Python
+      - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install system dependencies (PDF fonts)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-dejavu-core 2>&1 | tail -3
 
-      - name: Restore Google credentials
+      - name: Install Python dependencies
         run: |
-          echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
-          echo '${{ secrets.GOOGLE_CLIENT_SECRET }}' > client_secret.json
+          python -m pip install --upgrade pip -q
+          pip install -r requirements.txt -q
 
-      - name: Run Agent
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      # ── Cache: restore score_cache.json & generation_progress.json ──
+      - name: Restore cache files
+        id: cache-restore
+        uses: actions/cache@v4
+        with:
+          path: |
+            score_cache.json
+            generation_progress.json
+          key: agent-cache-${{ github.run_id }}
+          restore-keys: |
+            agent-cache-
+
+      - name: Ensure cache files exist
         run: |
-          python main.py
+          if [ ! -f score_cache.json ]; then echo '[]' > score_cache.json; fi
+          if [ ! -f generation_progress.json ]; then echo '{}' > generation_progress.json; fi
 
-      - name: Upload Outputs
+      # ── Restore Google OAuth credentials ────────────────────────────
+      - name: Restore Google OAuth credentials
+        run: |
+          # Reconstruct token.json from GitHub secret
+          if [ -n "${{ secrets.GOOGLE_TOKEN_JSON }}" ]; then
+            echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+            echo "token.json restored from secret"
+          fi
+          # Reconstruct client_secret.json from GitHub secret
+          if [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]; then
+            echo '${{ secrets.GOOGLE_CLIENT_SECRET }}' > client_secret.json
+            echo "client_secret.json restored from secret"
+          fi
+
+      # ── Scrape jobs from all sources ────────────────────────────────
+      - name: Scrape Naukri jobs
+        run: python main.py --fetch-naukri --only-naukri
+        continue-on-error: true
+
+      - name: Scrape Indeed jobs
+        run: python main.py --fetch-indeed --only-indeed
+        continue-on-error: true
+
+      - name: Scrape LinkedIn jobs
+        run: python main.py --fetch-linkedin --only-linkedin
+        continue-on-error: true
+
+      # ── Auto-score new jobs ─────────────────────────────────────────
+      - name: Auto-score new jobs
+        run: python auto_scorer.py
+        continue-on-error: true
+
+      # ── Generate CVs, Cover Letters & upload to Google Sheets ───────
+      - name: Generate CVs and Cover Letters
+        run: python main.py
+        continue-on-error: true
+
+      # ── Cache: save updated cache files ─────────────────────────────
+      - name: Save cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            score_cache.json
+            generation_progress.json
+          key: agent-cache-${{ github.run_id }}
+
+      # ── Upload generated files as artifact ──────────────────────────
+      - name: Upload generated outputs
         uses: actions/upload-artifact@v4
         with:
-          name: generated-files
+          name: generated-files-${{ github.run_id }}
           path: outputs/
+          if-no-files-found: warn
+
+      # ── Commit updated cache back to repository ─────────────────────
+      - name: Commit cache updates back to repo
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update cache files [skip ci]"
+          file_pattern: score_cache.json generation_progress.json
+          commit_user_name: "AI Jobs Agent Bot"
+          commit_user_email: "bot@ai-jobs-agent.local"
+          skip_dirty_check: false
