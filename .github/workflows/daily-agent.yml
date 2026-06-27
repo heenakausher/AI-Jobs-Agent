@@ -69,17 +69,9 @@ jobs:
           echo "${{ secrets.CV_TEXT_BASE64 }}" | base64 -d > enhanced_cv.txt
           echo "✓ enhanced_cv.txt restored"
 
-      # ── Scrape jobs from all sources ────────────────────────────────
-      - name: Scrape Naukri jobs
-        run: python main.py --fetch-naukri --only-naukri
-        continue-on-error: true
-
-      - name: Scrape Indeed jobs
-        run: python main.py --fetch-indeed --only-indeed
-        continue-on-error: true
-
-      - name: Scrape LinkedIn jobs
-        run: python main.py --fetch-linkedin --only-linkedin
+      # ── Scrape all job sources in parallel ──────────────────────────
+      - name: Scrape all job sources (parallel)
+        run: python main.py --fetch-naukri --fetch-indeed --fetch-linkedin --parallel --only-naukri
         continue-on-error: true
 
       # ── Auto-score new jobs ─────────────────────────────────────────
@@ -136,6 +128,7 @@ jobs:
             processed_jobs.json
             score_cache.json
             generation_progress.json
+            last_run.json
             scraper_health.json
             stats_report.html
           if-no-files-found: ignore
@@ -145,7 +138,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: update cache files [skip ci]"
-          file_pattern: score_cache.json generation_progress.json
+          file_pattern: score_cache.json generation_progress.json last_run.json
           commit_user_name: "AI Jobs Agent Bot"
           commit_user_email: "bot@ai-jobs-agent.local"
           skip_dirty_check: false

@@ -12,7 +12,7 @@ ALL_ROLES_FILE = JOBS_JSON
 CV_FILE_PATH = CV_FILE
 SCORE_CACHE_PATH = SCORE_CACHE
 
-_last_stats = {"jobs_scored": 0, "recommended": 0}
+_last_stats = {"jobs_scored": 0, "recommended": 0, "above_threshold": 0}
 
 SCORING_PROMPT = """You are an expert ATS and career coach evaluating how well a candidate's profile matches a job description.
 
@@ -107,10 +107,17 @@ def score_all_unscored(cv_path: str = CV_FILE_PATH, all_roles_path: str = ALL_RO
 
     log.info("Scoring %s unscored jobs with Groq...", len(unscored))
     new_scores = []
+
+    try:
+        from tqdm import tqdm
+        pbar = tqdm(total=len(unscored), desc="  Scoring", ascii=True, ncols=80,
+                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+    except ImportError:
+        pbar = None
+
     for i, job in enumerate(unscored, 1):
         title = job.get("title", "N/A")
         company = job.get("company", "N/A")
-        log.info("  [%s/%s] Scoring: %s @ %s", i, len(unscored), title, company)
         try:
             score, reason = score_single_job(job, cv_text)
             new_scores.append({
@@ -120,11 +127,16 @@ def score_all_unscored(cv_path: str = CV_FILE_PATH, all_roles_path: str = ALL_RO
                 "score": score,
                 "reason": reason,
             })
-            log.info("    Score: %s/10 — %s", score, reason)
+            log.info("    Score: %s/10 \u2014 %s", score, reason)
         except Exception as e:
             log.error("    FAILED: %s", e)
-        if i < len(unscored):
-            time.sleep(1.5)
+        if pbar:
+            pbar.update(1)
+        else:
+            log.info("  [%s/%s] Scoring: %s @ %s", i, len(unscored), title, company)
+
+    if pbar:
+        pbar.close()
 
     if new_scores:
         existing_scores.extend(new_scores)
@@ -135,6 +147,10 @@ def score_all_unscored(cv_path: str = CV_FILE_PATH, all_roles_path: str = ALL_RO
 
     good = [s for s in existing_scores if isinstance(s.get("score"), int) and s["score"] > 6]
     _last_stats["recommended"] = len(good)
+
+    from config import MIN_AI_SCORE
+    above = [s for s in existing_scores if isinstance(s.get("score"), int) and s["score"] > MIN_AI_SCORE]
+    _last_stats["above_threshold"] = len(above)
 
     return len(new_scores)
 

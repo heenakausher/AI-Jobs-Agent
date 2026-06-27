@@ -87,9 +87,15 @@ LEGACY_SEARCHES = [
     {"keyword": "Finance Intern", "category": "fresher_ai_ml"},
 ]
 
-MAX_PAGES = 5
+MAX_PAGES = 2
 REQUEST_TIMEOUT = 30
 CONCURRENT_WORKERS = 10
+
+JOB_AGE_DAYS_FIRST = 7
+JOB_AGE_DAYS_SUBSEQUENT = 1
+LAST_RUN_FILE = "last_run.json"
+SEARCH_CACHE_FILE = "search_cache.json"
+DUPLICATE_STOP_THRESHOLD = 0.5
 
 MIN_AI_SCORE = 6
 SCORING_MODEL = "llama-3.3-70b-versatile"

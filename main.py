@@ -24,7 +24,8 @@ from config import (
     SCORE_CACHE, PROGRESS_FILE, STATS_FILE, HEALTH_FILE,
     CLIENT_SECRET_FILE, TOKEN_FILE, SHEET_ID, SCOPES,
     GENERATION_MODEL, OUTPUT_DATE_DIR, CONCURRENT_WORKERS,
-    HEALTH_CONSECUTIVE_ZERO_THRESHOLD, MAX_PAGES
+    HEALTH_CONSECUTIVE_ZERO_THRESHOLD, MAX_PAGES,
+    LAST_RUN_FILE, JOB_AGE_DAYS_FIRST, JOB_AGE_DAYS_SUBSEQUENT
 )
 
 logging.basicConfig(
@@ -56,6 +57,26 @@ def timer_elapsed_seconds() -> float:
     if _start_time is None:
         return 0.0
     return time.time() - _start_time
+
+def load_last_run() -> int:
+    if os.path.exists(LAST_RUN_FILE):
+        try:
+            with open(LAST_RUN_FILE, "r") as f:
+                data = json.load(f)
+            last = datetime.datetime.fromisoformat(data.get("last_run", ""))
+            hours_since = (datetime.datetime.now() - last).total_seconds() / 3600
+            if hours_since < 24:
+                return JOB_AGE_DAYS_SUBSEQUENT
+        except (json.JSONDecodeError, ValueError, TypeError, OSError):
+            pass
+    return JOB_AGE_DAYS_FIRST
+
+def save_last_run():
+    try:
+        with open(LAST_RUN_FILE, "w") as f:
+            json.dump({"last_run": datetime.datetime.now().isoformat()}, f)
+    except OSError as e:
+        log.warning("  Failed to save last_run.json: %s", e)
 
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor, Emu
@@ -1023,20 +1044,22 @@ def _print_scraper_summary(name: str, stats: dict, health: dict):
     status = "OK" if h.get("healthy", True) else "BROKEN"
 
     log.info("%s:", name)
-    log.info("  Queries executed:   %s", stats.get("queries", 0))
-    log.info("  Pages scraped:      %s", stats.get("pages", 0))
-    log.info("  Jobs found:         %s", stats.get("jobs_found", 0))
-    log.info("  Duplicates removed: %s", stats.get("duplicates", 0))
-    log.info("  New jobs:           %s", stats.get("new_jobs", 0))
-    log.info("  Failed requests:    %s", stats.get("failed_requests", 0))
-    log.info("  Avg response time:  %.2fs", avg_resp)
-    log.info("  Health status:      %s", status)
+    log.info("  Total search queries executed:  %s", stats.get("queries", 0))
+    log.info("  Total pages scraped:            %s", stats.get("pages", 0))
+    log.info("  Total jobs found:               %s", stats.get("jobs_found", 0))
+    log.info("  Duplicate jobs removed:         %s", stats.get("duplicates", 0))
+    log.info("  New jobs added:                 %s", stats.get("new_jobs", 0))
+    log.info("  Early stopped searches:         %s", stats.get("early_stopped", 0))
+    log.info("  Failed requests:                %s", stats.get("failed_requests", 0))
+    log.info("  Average response time:          %.2fs", avg_resp)
+    log.info("  Total runtime:                  %.1fs", stats.get("total_duration", 0))
+    log.info("  Health status:                  %s", status)
 
     if stats.get("jobs_found", 0) == 0:
-        log.info("  ⚠ WARNING: %s scraper returned zero jobs", name)
+        log.info("  WARNING: %s scraper returned zero jobs", name)
 
 
-def run_scraper_internal(scraper_module, name: str, pages: int = None, location: str = None) -> tuple:
+def run_scraper_internal(scraper_module, name: str, pages: int = None, location: str = None, job_age: int = 7) -> tuple:
     total_jobs = []
     total_new = 0
     scraper_stats = {}
@@ -1044,9 +1067,9 @@ def run_scraper_internal(scraper_module, name: str, pages: int = None, location:
     try:
         if hasattr(scraper_module, 'fetch_all') and callable(scraper_module.fetch_all):
             if location:
-                jobs = scraper_module.fetch_all(location=location, pages_per_search=pages)
+                jobs = scraper_module.fetch_all(location=location, pages_per_search=pages, job_age=job_age)
             else:
-                jobs = scraper_module.fetch_all(pages_per_search=pages)
+                jobs = scraper_module.fetch_all(pages_per_search=pages, job_age=job_age)
         else:
             jobs = scraper_module.fetch_all(location=location or CITIES[0], pages_per_search=pages or MAX_PAGES)
 
@@ -1120,6 +1143,10 @@ def main():
             except ValueError:
                 pass
 
+    job_age = load_last_run()
+    log.info("Job age filter: %s days (first run: %sd, subsequent: %sd)",
+             job_age, JOB_AGE_DAYS_FIRST, JOB_AGE_DAYS_SUBSEQUENT)
+
     any_fetch = False
     only_mode = False
     parallel = "--parallel" in sys.argv
@@ -1152,7 +1179,8 @@ def main():
             with ThreadPoolExecutor(max_workers=len(scraper_configs)) as executor:
                 futures = {}
                 for mod, name, pages, locs in scraper_configs:
-                    future = executor.submit(run_scraper_internal, mod, name, pages, locs[0] if len(locs) == 1 else None)
+                    loc_arg = locs[0] if len(locs) == 1 else None
+                    future = executor.submit(run_scraper_internal, mod, name, pages, loc_arg, job_age)
                     futures[future] = name
 
                 for future in as_completed(futures):
@@ -1170,14 +1198,16 @@ def main():
             for mod, name, pages, locs in scraper_configs:
                 if len(locs) > 0:
                     log.info("Fetching %s jobs (single location mode: %s)...", name, locs[0])
-                    jobs, added, stats = run_scraper_internal(mod, name, pages, locs[0] if len(locs) == 1 else None)
+                    jobs, added, stats = run_scraper_internal(mod, name, pages, locs[0] if len(locs) == 1 else None, job_age)
                 else:
-                    jobs, added, stats = run_scraper_internal(mod, name, pages)
+                    jobs, added, stats = run_scraper_internal(mod, name, pages, job_age=job_age)
                 log_scraper_results(name, jobs, added)
                 source_stats[name.lower()] = stats
                 health_data = _detect_broken_scraper(name, len(jobs), health_data)
 
         _save_health(health_data)
+
+        save_last_run()
 
         if any_fetch and only_mode:
             _print_separator("SCRAPING SUMMARY")
@@ -1187,7 +1217,7 @@ def main():
 
             elapsed = timer_elapsed()
             log.info("%s", "=" * 50)
-            log.info("Execution time: %s", elapsed)
+            log.info("Total execution time: %s", elapsed)
             return
 
     if any_fetch and not only_mode:
@@ -1318,17 +1348,34 @@ def main():
             log.info("%s: (not fetched)", name_key.capitalize())
 
     _print_separator("PROCESSING SUMMARY")
-    log.info("Jobs scored:         %s", len(scored))
-    log.info("Average score:       %.1f/10", sum(r['score'] for r in scored) / len(scored) if scored else 0)
-    log.info("Recommended:         %s", len(good))
-    log.info("CV generated:        %s", completed)
-    log.info("Cover letters:       %s", completed)
-    log.info("Skipped (done):      %s", skipped)
-    log.info("Failed:              %s", failed)
-    log.info("Sheets uploads:      %s", sheet_uploads)
-    log.info("Sheets failures:     %s", sheet_failures)
-    log.info("Execution time:      %s", elapsed_str)
-    log.info("Output dir:          %s/", OUTPUT_DATE_DIR)
+    log.info("Total jobs in database:      %s", len(all_jobs))
+    log.info("Jobs scored:                 %s", len(scored))
+    log.info("Average score:               %.1f/10", sum(r['score'] for r in scored) / len(scored) if scored else 0)
+    log.info("Jobs above threshold (%s+):   %s", MIN_AI_SCORE, len(good))
+    log.info("CVs generated:               %s", completed)
+    log.info("Cover letters generated:     %s", completed)
+    log.info("Google Sheets rows uploaded: %s", sheet_uploads)
+    log.info("Skipped (already done):      %s", skipped)
+    log.info("Failed:                      %s", failed)
+    log.info("Total execution time:        %s", elapsed_str)
+    log.info("Output directory:            %s/", OUTPUT_DATE_DIR)
+
+    _print_separator("WHERE TIME WAS SPENT")
+    total_elapsed = timer_elapsed_seconds()
+    log.info("%-20s %12s %12s", "Phase", "Duration", "% of Total")
+    log.info("%s", "-" * 46)
+    scrape_total = 0.0
+    for name_key in ["naukri", "indeed", "linkedin"]:
+        sd = source_stats.get(name_key, {})
+        dur = sd.get("total_duration", 0) if isinstance(sd, dict) else 0
+        scrape_total += dur
+        pct = (dur / total_elapsed * 100) if total_elapsed > 0 else 0
+        log.info("%-20s %8.1fs %10.1f%%", name_key.capitalize() + " scrape", dur, pct)
+    gen_dur = max(0, total_elapsed - scrape_total)
+    gen_pct = (gen_dur / total_elapsed * 100) if total_elapsed > 0 else 0
+    log.info("%-20s %8.1fs %10.1f%%", "Scoring + generation", gen_dur, gen_pct)
+    log.info("-" * 46)
+    log.info("%-20s %8.1fs %10.1f%%", "TOTAL", total_elapsed, 100.0)
     log.info("%s", "=" * 50)
 
     # ── Save agent_stats.json ──────────────────────────────────────
@@ -1340,16 +1387,27 @@ def main():
         source_stats.get(s, {}).get("duplicates", 0)
         for s in ["naukri", "indeed", "linkedin"]
     )
+    total_queries = sum(
+        source_stats.get(s, {}).get("queries", 0)
+        for s in ["naukri", "indeed", "linkedin"]
+    )
+    total_early_stopped = sum(
+        source_stats.get(s, {}).get("early_stopped", 0)
+        for s in ["naukri", "indeed", "linkedin"]
+    )
 
     stats_entry = {
         "date": datetime.date.today().isoformat(),
         "runtime_seconds": round(elapsed_sec, 1),
+        "job_age_days": job_age,
         "naukri": source_stats.get("naukri", {}),
         "indeed": source_stats.get("indeed", {}),
         "linkedin": source_stats.get("linkedin", {}),
         "total": {
+            "queries": total_queries,
             "jobs_found": total_jobs_found,
             "duplicates": total_duplicates,
+            "early_stopped": total_early_stopped,
             "new_jobs": sum(
                 source_stats.get(s, {}).get("new_jobs", 0)
                 for s in ["naukri", "indeed", "linkedin"]

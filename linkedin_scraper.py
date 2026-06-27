@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ from config import (
     get_expanded_searches, CITIES, EXPERIENCE_LEVELS,
     EXPERIENCE_PARAMS, MAX_PAGES, CONCURRENT_WORKERS,
     RATE_LIMIT_LINKEDIN, MAX_RETRIES_SCRAPER, REQUEST_TIMEOUT,
-    JOBS_JSON
+    JOBS_JSON, DUPLICATE_STOP_THRESHOLD
 )
 
 log = logging.getLogger("agent")
@@ -32,14 +33,27 @@ HEADERS = {
 ALL_ROLES_FILE = JOBS_JSON
 LINKEDIN_OUTPUT = "linkedin_jobs.json"
 
+_search_cache = {}
+_cache_lock = threading.Lock()
+
 _last_stats = {
     "queries": 0, "pages": 0, "jobs_found": 0,
     "duplicates": 0, "new_jobs": 0, "failed_requests": 0,
     "total_duration": 0.0, "durations": [],
+    "early_stopped": 0,
 }
 
 _rate_limiter = threading.Lock()
 _last_request_time = 0.0
+
+PROGRESS_BAR_STYLE = {
+    "ascii": True,
+    "ncols": 80,
+    "bar_format": "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+}
+
+# LinkedIn f_TPR parameter values
+TIME_FILTERS = {1: "r86400", 7: "r604800", 30: "r2592000"}
 
 
 def _rate_limit():
@@ -51,7 +65,17 @@ def _rate_limit():
         _last_request_time = time.time()
 
 
-def _fetch_url(url: str, headers: dict = None, max_retries: int = 3) -> str:
+def _cache_key(url: str) -> str:
+    return hashlib.md5(url.encode()).hexdigest()
+
+
+def _cached_fetch_html(url: str, headers: dict = None, max_retries: int = 3) -> str:
+    ck = _cache_key(url)
+    with _cache_lock:
+        if ck in _search_cache:
+            log.debug("  LinkedIn cache HIT: %s", url[:80])
+            return _search_cache[ck]
+
     h = {**HEADERS, **(headers or {})}
     last_err = None
     for attempt in range(1, max_retries + 1):
@@ -61,9 +85,12 @@ def _fetch_url(url: str, headers: dict = None, max_retries: int = 3) -> str:
             resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
             html = resp.read()
             try:
-                return html.decode("utf-8")
+                html_str = html.decode("utf-8")
             except UnicodeDecodeError:
-                return html.decode("utf-8", errors="replace")
+                html_str = html.decode("utf-8", errors="replace")
+            with _cache_lock:
+                _search_cache[ck] = html_str
+            return html_str
         except urllib.error.HTTPError as e:
             last_err = f"HTTP {e.code}"
             if e.code in (403, 429):
@@ -88,7 +115,7 @@ def _clean_html(text: str) -> str:
     return text
 
 
-def search_linkedin_api(keyword: str, location: str, start: int = 0, experience: str = None) -> list:
+def search_linkedin_api(keyword: str, location: str, start: int = 0, experience: str = None, job_age: int = 7) -> list:
     params = {
         "keywords": keyword,
         "location": location,
@@ -98,12 +125,14 @@ def search_linkedin_api(keyword: str, location: str, start: int = 0, experience:
     if exp_val:
         params["f_E"] = exp_val
 
+    tpr = TIME_FILTERS.get(job_age, "r604800")
+    params["f_TPR"] = tpr
+
     url = f"{LINKEDIN_BASE}/jobs-guest/jobs/api/seeMoreJobPostings/search?{urllib.parse.urlencode(params)}"
 
-    log.debug("  LinkedIn: city=%s role=%s exp=%s start=%s", location, keyword, experience or "all", start)
-    log.debug("  URL: %s", url)
+    log.debug("  LinkedIn: city=%s role=%s exp=%s start=%s age=%sd", location, keyword, experience or "all", start, job_age)
 
-    html = _fetch_url(url)
+    html = _cached_fetch_html(url)
     if not html:
         return []
 
@@ -177,7 +206,7 @@ def fetch_job_description(job_id: str) -> str:
         clean_id = job_id
 
     url = f"{LINKEDIN_BASE}/jobs-guest/jobs/api/jobPosting/{clean_id}"
-    html = _fetch_url(url)
+    html = _cached_fetch_html(url)
     if not html:
         return ""
 
@@ -224,49 +253,65 @@ def transform_linkedin_job(raw: dict, category: str = "data_analyst", keyword: s
     }
 
 
-def _search_combo(keyword: str, category: str, city: str, experience: str, pages_per_search: int) -> list:
-    log.info("  LinkedIn: city=%s role=%s exp=%s", city, keyword, experience)
+def _search_combo(keyword: str, category: str, city: str, experience: str, pages_per_search: int, job_age: int) -> list:
+    _last_stats["queries"] += 1
     start_ts = time.time()
     seen_ids = set()
     all_jobs = []
+    stop_early = False
 
     for page in range(pages_per_search):
+        if stop_early:
+            _last_stats["early_stopped"] += 1
+            log.debug("  LinkedIn early stop at page %s for %s/%s/%s", page + 1, keyword, city, experience)
+            break
+
         start = page * 10
-        raw_jobs = search_linkedin_api(keyword, city, start=start, experience=experience)
+        raw_jobs = search_linkedin_api(keyword, city, start=start, experience=experience, job_age=job_age)
         if not raw_jobs:
             if page == 0:
                 log.debug("  No results for '%s' at %s exp=%s", keyword, city, experience)
             break
 
+        dup_count = 0
         for raw in raw_jobs:
             jid = raw.get("job_id", "")
             if jid in seen_ids:
+                dup_count += 1
                 continue
             seen_ids.add(jid)
             transformed = transform_linkedin_job(raw, category=category, keyword=keyword)
             all_jobs.append(transformed)
 
         _last_stats["pages"] += 1
-        log.debug("  Page %s: %s jobs (total unique: %s)", page + 1, len(raw_jobs), len(all_jobs))
+        log.debug("  Page %s: %s jobs, %s dups, total unique: %s", page + 1, len(raw_jobs), dup_count, len(all_jobs))
+
+        if page > 0 and dup_count > 0:
+            dup_ratio = dup_count / len(raw_jobs)
+            if dup_ratio >= DUPLICATE_STOP_THRESHOLD:
+                log.debug("  Stopping early at page %s (%.0f%% duplicates)", page + 1, dup_ratio * 100)
+                stop_early = True
 
     duration = time.time() - start_ts
-    log.info("  LinkedIn: city=%s role=%s exp=%s → %s jobs (%.1fs)", city, keyword, experience, len(all_jobs), duration)
-    _last_stats["queries"] += 1
     _last_stats["jobs_found"] += len(all_jobs)
+    log.info("  LinkedIn: city=%s role=%s exp=%s \u2192 %s jobs (%.1fs)", city, keyword, experience, len(all_jobs), duration)
 
     return all_jobs
 
 
-def fetch_all(location=None, pages_per_search=None, experience=None):
-    global _last_stats
+def fetch_all(location=None, pages_per_search=None, experience=None, job_age=7):
+    global _last_stats, _search_cache
     _last_stats = {
         "queries": 0, "pages": 0, "jobs_found": 0,
         "duplicates": 0, "new_jobs": 0, "failed_requests": 0,
         "total_duration": 0.0, "durations": [],
+        "early_stopped": 0,
     }
 
     if pages_per_search is None:
         pages_per_search = MAX_PAGES
+
+    _search_cache = {}
 
     searches = get_expanded_searches()
     cities = [location] if location else CITIES
@@ -281,11 +326,18 @@ def fetch_all(location=None, pages_per_search=None, experience=None):
               for e in experiences]
 
     start_all = time.time()
+    log.info("  LinkedIn: %s combos x %s pages (age=%sd), %s workers", len(combos), pages_per_search, job_age, CONCURRENT_WORKERS)
+
+    try:
+        from tqdm import tqdm
+        pbar = tqdm(total=len(combos), desc="  LinkedIn", **PROGRESS_BAR_STYLE)
+    except ImportError:
+        pbar = None
 
     with ThreadPoolExecutor(max_workers=CONCURRENT_WORKERS) as executor:
         futures = {}
         for keyword, category, city, exp in combos:
-            future = executor.submit(_search_combo, keyword, category, city, exp, pages_per_search)
+            future = executor.submit(_search_combo, keyword, category, city, exp, pages_per_search, job_age)
             futures[future] = (keyword, city, exp)
 
         for future in as_completed(futures):
@@ -301,7 +353,12 @@ def fetch_all(location=None, pages_per_search=None, experience=None):
             except Exception as e:
                 _last_stats["failed_requests"] += 1
                 kw, city, exp = futures[future]
-                log.warning("  LinkedIn combo failed: %s / %s / %s — %s", kw, city, exp, e)
+                log.warning("  LinkedIn combo failed: %s / %s / %s \u2014 %s", kw, city, exp, e)
+            if pbar:
+                pbar.update(1)
+
+    if pbar:
+        pbar.close()
 
     _last_stats["total_duration"] = time.time() - start_all
     _last_stats["jobs_found"] = len(all_jobs)
