@@ -1,0 +1,84 @@
+{
+  "_comment": "Editable search configuration. No code changes needed.",
+  "keywords": [
+    "Data Analyst",
+    "Business Analyst",
+    "Business Intelligence Analyst",
+    "BI Analyst",
+    "Financial Analyst",
+    "FP&A Analyst",
+    "Power BI Developer",
+    "SQL Developer",
+    "Python Data Analyst",
+    "AI Engineer",
+    "ML Engineer",
+    "GenAI Engineer",
+    "LLM Engineer",
+    "Agentic AI Engineer",
+    "Prompt Engineer",
+    "RAG Engineer",
+    "Data Scientist",
+    "Analytics Engineer",
+    "Data Engineer",
+    "Machine Learning Engineer",
+    "NLP Engineer",
+    "AI Developer",
+    "Python AI Developer",
+    "SAP FICO Consultant",
+    "Finance Executive",
+    "Finance Manager",
+    "Accounts Executive",
+    "Accountant",
+    "AI Intern",
+    "ML Intern",
+    "GenAI Intern",
+    "Data Analytics Intern",
+    "Business Intelligence Intern"
+  ],
+  "cities": [
+    "Hyderabad",
+    "Pune",
+    "Bengaluru",
+    "Chennai"
+  ],
+  "search_modes": {
+    "remote": true,
+    "hybrid": true,
+    "work_from_home": true,
+    "india_wide": true
+  },
+  "experience_levels": [
+    "Internship",
+    "Fresher",
+    "0-1 years",
+    "1-3 years",
+    "Mid level",
+    "Experienced"
+  ],
+  "posted_within_hours": 24,
+  "max_pages_per_search": 10,
+  "max_workers": 10,
+  "rate_limit_min_seconds": 2,
+  "rate_limit_max_seconds": 7,
+  "websites": {
+    "naukri": true,
+    "indeed": true,
+    "linkedin": true
+  },
+  "scoring": {
+    "min_score_threshold": 6,
+    "role_match_weight": 0.35,
+    "skills_match_weight": 0.25,
+    "experience_match_weight": 0.15,
+    "location_match_weight": 0.10,
+    "salary_match_weight": 0.05,
+    "company_quality_weight": 0.05,
+    "recency_weight": 0.05
+  },
+  "resume": {
+    "max_pages": 2,
+    "min_ats_score": 90,
+    "reuse_threshold_similarity": 0.85
+  },
+  "github_username": "heenakausher"
+}

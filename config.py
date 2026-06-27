@@ -1,23 +1,79 @@
+"""Configuration — loads search_config.json then exposes typed settings."""
+
+import json
 import os
-import datetime
+from typing import Any, Dict, List, Optional
 
-CITIES = [
-    "Hyderabad",
-    "Pune",
-    "Bengaluru",
-    "Chennai",
-    "Remote",
-    "All India",
-]
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_CONFIG_DIR = os.path.join(_APP_DIR, "config")
 
-EXPERIENCE_LEVELS = [
-    "Internship",
-    "Fresher",
-    "0-1 years",
-    "1-3 years",
-    "Mid level",
-    "Experienced",
-]
+
+def _load_json(path: str, default: Any = None) -> Any:
+    if not os.path.exists(path):
+        return default if default is not None else {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ── Search config ────────────────────────────────────────────────
+_search_config: Dict[str, Any] = _load_json(
+    os.path.join(_CONFIG_DIR, "search_config.json"),
+    {}
+)
+
+SEARCH_KEYWORDS: List[str] = _search_config.get("keywords", [
+    "Data Analyst", "Business Analyst", "Business Intelligence Analyst",
+])
+SEARCH_CITIES: List[str] = _search_config.get("cities", [
+    "Hyderabad", "Pune", "Bengaluru", "Chennai",
+])
+SEARCH_MODES: Dict[str, bool] = _search_config.get("search_modes", {
+    "remote": True,
+    "hybrid": True,
+    "work_from_home": True,
+    "india_wide": True,
+})
+EXPERIENCE_LEVELS: List[str] = _search_config.get("experience_levels", [
+    "Internship", "Fresher", "0-1 years", "1-3 years", "Mid level", "Experienced",
+])
+POSTED_WITHIN_HOURS: int = _search_config.get("posted_within_hours", 24)
+MAX_PAGES_PER_SEARCH: int = _search_config.get("max_pages_per_search", 10)
+MAX_WORKERS: int = _search_config.get("max_workers", 10)
+RATE_LIMIT_MIN: float = float(_search_config.get("rate_limit_min_seconds", 2))
+RATE_LIMIT_MAX: float = float(_search_config.get("rate_limit_max_seconds", 7))
+
+WEBSITES: Dict[str, bool] = _search_config.get("websites", {
+    "naukri": True, "indeed": True, "linkedin": True,
+})
+
+# ── Scoring config ────────────────────────────────────────────────
+_scoring_config: Dict[str, Any] = _search_config.get("scoring", {})
+MIN_AI_SCORE: int = _scoring_config.get("min_score_threshold", 6)
+ROLE_WEIGHT: float = _scoring_config.get("role_match_weight", 0.35)
+SKILLS_WEIGHT: float = _scoring_config.get("skills_match_weight", 0.25)
+EXP_WEIGHT: float = _scoring_config.get("experience_match_weight", 0.15)
+LOC_WEIGHT: float = _scoring_config.get("location_match_weight", 0.10)
+SALARY_WEIGHT: float = _scoring_config.get("salary_match_weight", 0.05)
+COMPANY_QUALITY_WEIGHT: float = _scoring_config.get("company_quality_weight", 0.05)
+RECENCY_WEIGHT: float = _scoring_config.get("recency_weight", 0.05)
+
+# ── Resume config ────────────────────────────────────────────────
+_resume_config: Dict[str, Any] = _search_config.get("resume", {})
+MAX_RESUME_PAGES: int = _resume_config.get("max_pages", 2)
+MIN_ATS_SCORE: int = _resume_config.get("min_ats_score", 90)
+REUSE_THRESHOLD: float = _resume_config.get("reuse_threshold_similarity", 0.85)
+
+# ── GitHub ────────────────────────────────────────────────────────
+GITHUB_USERNAME: str = _search_config.get("github_username", "heenakausher")
+
+# ── Blacklist ────────────────────────────────────────────────────
+BLACKLIST: List[str] = _load_json(
+    os.path.join(_CONFIG_DIR, "blacklist_companies.json"),
+    []
+)
+
+# ── Static config (unchanged) ────────────────────────────────────
+CITIES = SEARCH_CITIES
 
 EXPERIENCE_PARAMS = {
     "naukri": {
@@ -36,71 +92,25 @@ EXPERIENCE_PARAMS = {
         "Mid level": "4",
         "Experienced": "5",
     },
+    "indeed": {
+        "Internship": "entry_level",
+        "Fresher": "entry_level",
+        "0-1 years": "entry_level",
+        "1-3 years": "mid_level",
+        "Mid level": "mid_level",
+        "Experienced": "senior_level",
+    },
 }
 
-ROLES_DATA = [
-    {"keyword": "Data Analyst", "category": "data_analyst", "synonyms": []},
-    {"keyword": "Business Analyst", "category": "data_analyst", "synonyms": []},
-    {"keyword": "Business Intelligence", "category": "data_analyst", "synonyms": ["BI", "Analytics", "Reporting", "Dashboard", "MIS"]},
-    {"keyword": "Power BI", "category": "data_analyst", "synonyms": []},
-    {"keyword": "Data Analytics", "category": "data_analyst", "synonyms": ["Data Analysis"]},
-    {"keyword": "Financial Analyst", "category": "finance_roles", "synonyms": []},
-    {"keyword": "Finance Executive", "category": "finance_roles", "synonyms": ["Finance Executive"]},
-    {"keyword": "Finance Manager", "category": "finance_roles", "synonyms": []},
-    {"keyword": "Accounts", "category": "finance_roles", "synonyms": ["Accountant"]},
-    {"keyword": "FP&A", "category": "finance_roles", "synonyms": ["Financial Planning", "Financial Planning & Analysis"]},
-    {"keyword": "SAP Finance", "category": "finance_roles", "synonyms": ["SAP FICO"]},
-    {"keyword": "Machine Learning Engineer", "category": "agentic_ai", "synonyms": ["ML Engineer"]},
-    {"keyword": "AI Engineer", "category": "agentic_ai", "synonyms": ["Artificial Intelligence Engineer"]},
-    {"keyword": "Generative AI", "category": "genai_llm", "synonyms": []},
-    {"keyword": "GenAI", "category": "genai_llm", "synonyms": ["Generative AI", "AI Automation", "Agentic AI"]},
-    {"keyword": "LLM", "category": "genai_llm", "synonyms": ["Large Language Model"]},
-    {"keyword": "RAG Engineer", "category": "genai_llm", "synonyms": ["RAG"]},
-    {"keyword": "Prompt Engineer", "category": "genai_llm", "synonyms": []},
-    {"keyword": "Agentic AI", "category": "genai_llm", "synonyms": ["AI Agent"]},
-    {"keyword": "Python AI", "category": "genai_llm", "synonyms": []},
-    {"keyword": "AI Developer", "category": "genai_llm", "synonyms": []},
-    {"keyword": "NLP Engineer", "category": "genai_llm", "synonyms": []},
-    {"keyword": "Data Scientist", "category": "agentic_ai", "synonyms": []},
-    {"keyword": "Analytics Engineer", "category": "data_analyst", "synonyms": []},
-    {"keyword": "AI Intern", "category": "fresher_ai_ml", "synonyms": []},
-    {"keyword": "ML Intern", "category": "fresher_ai_ml", "synonyms": []},
-    {"keyword": "GenAI Intern", "category": "fresher_ai_ml", "synonyms": []},
-]
-
-LEGACY_SEARCHES = [
-    {"keyword": "Data Analyst", "category": "data_analyst"},
-    {"keyword": "Business Analyst", "category": "data_analyst"},
-    {"keyword": "Business Intelligence", "category": "data_analyst"},
-    {"keyword": "Data Analytics", "category": "data_analyst"},
-    {"keyword": "Power BI", "category": "data_analyst"},
-    {"keyword": "Financial Analyst", "category": "finance_roles"},
-    {"keyword": "Finance", "category": "finance_roles"},
-    {"keyword": "SAP FICO", "category": "finance_roles"},
-    {"keyword": "Agentic AI", "category": "agentic_ai"},
-    {"keyword": "AI Engineer", "category": "agentic_ai"},
-    {"keyword": "Machine Learning", "category": "agentic_ai"},
-    {"keyword": "GenAI", "category": "agentic_ai"},
-    {"keyword": "LLM", "category": "agentic_ai"},
-    {"keyword": "RAG", "category": "agentic_ai"},
-    {"keyword": "AI Intern", "category": "fresher_ai_ml"},
-    {"keyword": "Finance Intern", "category": "fresher_ai_ml"},
-]
-
-MAX_PAGES = 2
 REQUEST_TIMEOUT = 30
-CONCURRENT_WORKERS = 10
-
-JOB_AGE_DAYS_FIRST = 7
-JOB_AGE_DAYS_SUBSEQUENT = 1
-LAST_RUN_FILE = "last_run.json"
-SEARCH_CACHE_FILE = "search_cache.json"
 DUPLICATE_STOP_THRESHOLD = 0.5
 
-MIN_AI_SCORE = 6
+# ── Models ────────────────────────────────────────────────────────
 SCORING_MODEL = "llama-3.3-70b-versatile"
 GENERATION_MODEL = "llama-3.1-8b-instant"
+REVIEW_MODEL = "llama-3.3-70b-versatile"
 
+# ── File paths ────────────────────────────────────────────────────
 OUTPUT_DIR = "outputs"
 JOBS_JSON = "processed_jobs.json"
 CV_FILE = "enhanced_cv.txt"
@@ -109,36 +119,17 @@ PROGRESS_FILE = "generation_progress.json"
 STATS_FILE = "agent_stats.json"
 HEALTH_FILE = "scraper_health.json"
 AGENT_LOG = "agent.log"
+SCRAPE_CHECKPOINT = "scrape_checkpoint.json"
 
+# ── Google Sheets ────────────────────────────────────────────────
 CLIENT_SECRET_FILE = "client_secret.json"
 TOKEN_FILE = "token.json"
 SHEET_ID = "1debuNPIgf0hYPIaUyLy42IARIXaNE46Gxp9hB50Y8H0"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-RATE_LIMIT_NAUKRI = 1.0
-RATE_LIMIT_INDEED = 2.0
-RATE_LIMIT_LINKEDIN = 2.0
-
-MAX_RETRIES = 3
-MAX_RETRIES_SCRAPER = 3
-
+# ── Health ────────────────────────────────────────────────────────
 HEALTH_CONSECUTIVE_ZERO_THRESHOLD = 3
 
+# ── Derived ────────────────────────────────────────────────────────
+import datetime
 OUTPUT_DATE_DIR = os.path.join(OUTPUT_DIR, datetime.date.today().strftime("%Y-%m-%d"))
-
-
-def get_expanded_searches():
-    searches = []
-    seen = set()
-    for role in ROLES_DATA:
-        kw = role["keyword"]
-        key = (kw.lower(), role["category"])
-        if key not in seen:
-            seen.add(key)
-            searches.append({"keyword": kw, "category": role["category"]})
-        for syn in role.get("synonyms", []):
-            key = (syn.lower(), role["category"])
-            if key not in seen:
-                seen.add(key)
-                searches.append({"keyword": syn, "category": role["category"]})
-    return searches

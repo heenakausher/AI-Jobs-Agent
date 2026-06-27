@@ -69,6 +69,14 @@ jobs:
           echo "${{ secrets.CV_TEXT_BASE64 }}" | base64 -d > enhanced_cv.txt
           echo "✓ enhanced_cv.txt restored"
 
+      - name: Verify CV contents
+        run: |
+          echo "Size:"
+          wc -c enhanced_cv.txt
+
+          echo "First 10 lines:"
+          head -10 enhanced_cv.txt
+
       # ── Scrape all job sources in parallel ──────────────────────────
       - name: Scrape all job sources (parallel)
         run: python main.py --fetch-naukri --fetch-indeed --fetch-linkedin --parallel --only-naukri

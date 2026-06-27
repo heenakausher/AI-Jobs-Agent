@@ -1,0 +1,93 @@
+=== HEENA KAUSHER - ENHANCED RESUME WITH AI PROJECTS ===
+
+Heena Kausher
+kausher92@gmail.com | 7898680077 | www.github.com/heenakausher
+www.linkedin.com/in/heena-kausher-90418a118 | www.mygreatlearning.com/eportfolio/heena-kausher
+
+=== PROFESSIONAL SUMMARY ===
+
+Data Analyst with 6+ years of experience delivering insights through dashboards, KPIs, and forecasting models. Proven success in automating reporting, analyzing customer and sales data, and supporting strategic planning. Actively building expertise in Agentic AI, LLMs, RAG systems, and multi-agent orchestration. Strong communicator who bridges the gap between business stakeholders and technical teams, with hands-on project experience in AI/ML engineering for real-world applications.
+
+=== TECHNICAL SKILLS ===
+
+**Data Analytics:** SQL, SAP S4 HANA, SAP (SAC), Python, Pandas, NumPy
+
+**Visualization & Reporting:** Tableau, Power BI, Advanced Excel, Advanced PowerPoint
+
+**AI / ML & GenAI:**
+- Agentic AI / Multi-Agent Systems (CrewAI, LangGraph)
+- Large Language Models (Groq LLM, Llama, GPT)
+- Retrieval-Augmented Generation (RAG) with LangChain
+- Vector Databases (Chroma DB, FAISS)
+- HuggingFace Embeddings & Transformers
+- Prompt Engineering & LLM Orchestration
+- Streamlit for AI App Development
+- GitHub Actions & CI/CD Pipelines
+
+**Other Skills:** Team Management, Financial Statements, FP&A, Budgeting, Projections, Accounting, Taxation
+
+=== GITHUB PROJECTS (AI/ML PORTFOLIO) ===
+
+**Project 1: Agentic AI - Multi-Agent Newsletter Generator**
+Technologies: Python, CrewAI, Groq LLM, LiteLLM, SerperDev API
+- Built an autonomous multi-agent system with 3 AI agents (Researcher, Writer, Proofreader)
+- Agents collaborate via CrewAI orchestration to research topics, write articles, and proofread
+- Uses Groq's llama-3.3-70b-versatile for fast LLM inference
+- Integrates live web search via SerperDev API for real-time research
+- Fully automated pipeline: topic input → research → writing → proofreading → markdown output
+- Demonstrates proficiency in agent orchestration, tool use, and LLM chaining
+GitHub: https://github.com/heenakausher/Agentic-AI
+
+**Project 2: AI Chatbot RAG - Retrieval-Augmented Generation Chatbot**
+Technologies: Python, LangChain, Streamlit, Groq LLM, HuggingFace Embeddings, Chroma DB
+- Built a 3-phase RAG chatbot with Streamlit frontend
+- Phase 1: Basic conversational chatbot interface
+- Phase 2: Groq LLM-powered intelligent chatbot with context awareness
+- Phase 3: PDF-based Q&A system using RAG — users upload PDFs, ask questions, get AI answers based on document content
+- Uses Chroma vector database for efficient document retrieval
+- HuggingFace embeddings for semantic search over document chunks
+- End-to-end implementation of the RAG pipeline: ingestion → chunking → embedding → retrieval → generation
+GitHub: https://github.com/heenakausher/ai-chatbot-rag
+
+**Project 3: GitHub Actions Automation**
+Technologies: GitHub Actions, YAML, CI/CD
+- Built automated CI/CD workflows for Python applications
+- Demonstrates DevOps and automation skills
+GitHub: https://github.com/heenakausher/apptestgithubaction
+
+=== WORK EXPERIENCE ===
+
+**Abis Export India Pvt Ltd (Rajnandgaon, C.G.) — Sep 2021 – Nov 2025**
+**Data Analyst**
+- Automated ad hoc and monthly reporting in Power BI for 12 segments, reducing manual work by 10 hours per week
+- Conducted in-depth customer analysis on performance, retention, acquisition costs, and yield
+- Led sales analysis across region, district, plant, product, and sales zones — optimized plant locations reducing logistics expenses by 10%
+- Enhanced expense and KPI reporting including branch performance and partner farmer efficiency
+- Developed budget and forecasting models, improving financial planning accuracy by 15%
+- Extracted and tested data from SAP S4 Hana, ensuring data quality and reliability
+- Provided functional support to IT and application development teams
+- Created dashboards in Power BI and Tableau automating profitability, cash flow, and weekly performance tracking
+
+**Simplex Castings Limited (Bhilai, C.G.) — Dec 2018 – Sep 2021**
+**Tax Officer**
+- Prepared Financial Statements, Income Tax and TDS filings, GST filings
+- Conducted Audit & Tax Audit of Financial Statements
+
+**Anaal Automobiles (Bhilai, C.G.) — Mar 2018 – Nov 2018**
+**Accountant**
+- Managed accounts receivable/payable exceeding ₹50 lakh with full accuracy
+- Maintained 100% accuracy in ledger entries in Tally Prime
+- Processed over 1,500 vouchers and invoices
+- Used Compu Tax for tax reporting
+
+=== EDUCATION ===
+
+• MBA - Banking & Finance, NMIMS CDOE | 67.33%
+• M.Com - Pt. Ravishankar Shukla University | 46.50%
+• B.Com - Pt. Ravishankar Shukla University | 60.44%
+
+=== PROFESSIONAL CERTIFICATIONS ===
+
+• PGP in Data Science & Analytics - Great Lakes Executive Learning | GPA: 3.9
+• Chartered Accountancy - IPCC (Group-1) | May 2012 | 52.75%
+• Chartered Accountancy - CPT | Dec 2010 | 55.00%
