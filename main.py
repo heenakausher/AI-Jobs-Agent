@@ -12,8 +12,13 @@ import naukri_scraper
 import indeed_scraper
 import linkedin_scraper
 import auto_scorer
+from prompts import (
+    detect_profile, build_system_prompt,
+    build_cover_letter_prompt, extract_delimited, extract_score,
+    PROFILES
+)
+from resume_reviewer import review_and_improve
 
-# ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s %(message)s",
@@ -38,18 +43,17 @@ def timer_elapsed() -> str:
     if elapsed < 60:
         return f"{elapsed:.1f}s"
     return f"{elapsed // 60:.0f}m {elapsed % 60:.0f}s"
+
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Pt, Inches, RGBColor, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from fpdf import FPDF
 
-# ── Google Sheets ──────────────────────────────────────────────────────────────
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as AuthRequest
 
-# ── Paths & config ─────────────────────────────────────────────────────────────
 JOBS_JSON = "processed_jobs.json"
 CV_FILE = "enhanced_cv.txt"
 SCORE_CACHE = "score_cache.json"
@@ -62,72 +66,6 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MODEL = "llama-3.1-8b-instant"
 
 OUTPUT_DATE_DIR = os.path.join(OUTPUT_DIR, datetime.date.today().strftime("%Y-%m-%d"))
-
-# ── Groq prompts ───────────────────────────────────────────────────────────────
-CUSTOMIZE_SYSTEM_PROMPT = """You are an expert ATS optimization specialist and career coach.
-
-Your task is to produce 4 items for a job application. Return them with the exact delimiters shown.
-
-STRICT RULES (violations will result in rejection):
-1. Do NOT invent or fabricate any skills, experience, projects, certifications, titles, or achievements not in the candidate's profile.
-2. Only rephrase, reorganize, restructure, de-emphasize, or emphasize information that already exists.
-3. You may change section order to prioritize what is most relevant for the target role.
-4. You may incorporate keywords from the job description ONLY where they genuinely match existing experience.
-5. Keep all dates, company names, percentages, and factual data exactly as in the original.
-6. For Agentic AI/ML roles: lead with AI skills + GitHub projects, then work experience.
-7. For Data Analyst/BI roles: lead with work experience and data tools, then AI projects.
-8. For Finance roles: lead with finance experience + education, then data analytics skills.
-
-Use these delimiters and format exactly:
-
-===TAILORED_CV===
-Heena Kausher
-kausher92@gmail.com | 7898680077 | www.github.com/heenakausher
-www.linkedin.com/in/heena-kausher-90418a118 | www.mygreatlearning.com/eportfolio/heena-kausher
-
-PROFESSIONAL SUMMARY
-<2-3 sentence summary prioritising relevant experience for the target role>
-
-TECHNICAL SKILLS
-Data Analytics: SQL, SAP S4 HANA, SAP (SAC), Python, Pandas, NumPy
-Visualization & Reporting: Tableau, Power BI, Advanced Excel, Advanced PowerPoint
-AI / ML & GenAI:
-Agentic AI / Multi-Agent Systems (CrewAI, LangGraph)
-Large Language Models (Groq LLM, Llama, GPT)
-...
-Other Skills: Team Management, Financial Statements, FP&A, Budgeting, Projections, Accounting, Taxation
-
-WORK EXPERIENCE
-Abis Export India Pvt Ltd (Rajnandgaon, C.G.) — Sep 2021 – Nov 2025
-Data Analyst
-- Automated ad hoc and monthly reporting in Power BI for 12 segments, reducing manual work by 10 hours per week
-...
-
-GITHUB PROJECTS
-Project 1: <title>
-Technologies: <list>
-- <bullet point>
-...
-GitHub: <url>
-
-EDUCATION
-- MBA - Banking & Finance, NMIMS CDOE | 67.33%
-- M.Com - Pt. Ravishankar Shukla University | 46.50%
-- B.Com - Pt. Ravishankar Shukla University | 60.44%
-
-CERTIFICATIONS
-- PGP in Data Science & Analytics - Great Lakes Executive Learning | GPA: 3.9
-- Chartered Accountancy - IPCC (Group-1) | May 2012 |  52.75%
-- Chartered Accountancy - CPT | Dec 2010 | 55.00%
-
-===COVER_LETTER===
-<professional cover letter, 250-400 words>
-
-===INTERVIEW_PREP===
-<comma-separated list of technical and behavioural topics to prepare for this role>
-
-===ACCEPTANCE_CHANCE===
-<number 0-100 representing estimated probability of acceptance"""
 
 
 def sanitize_folder_name(s: str) -> str:
@@ -157,8 +95,6 @@ def save_progress(path: str, data: dict):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-
-# ── Google Sheets ───────────────────────────────────────────────────────────────
 
 def get_sheets_token() -> str:
     if not os.path.exists(TOKEN_FILE):
@@ -223,9 +159,15 @@ def append_sheet_row(token: str, row: list, max_retries: int = 3):
             return
 
 
-# ── Groq generation ────────────────────────────────────────────────────────────
-
 def generate_for_job(job: dict, cv_text: str) -> tuple:
+    profile = detect_profile(
+        job.get('title', ''),
+        job.get('description', ''),
+        job.get('category', '')
+    )
+    log.info("  Detected profile: %s", profile)
+
+    system_prompt = build_system_prompt(profile, cv_text)
     user_prompt = f"""TARGET JOB:
 Title: {job['title']}
 Company: {job['company']}
@@ -240,44 +182,49 @@ CANDIDATE'S ORIGINAL PROFILE (use ONLY this information):
 
 Produce the 4 items (tailored CV, cover letter, interview prep topics, acceptance chance) for this role."""
 
-    response = query_groq(CUSTOMIZE_SYSTEM_PROMPT, user_prompt, model=MODEL)
+    response = query_groq(system_prompt, user_prompt, model=MODEL)
 
-    def extract_delimiter(label: str) -> str:
-        start = response.find(f"==={label}===")
-        if start == -1:
-            return ""
-        start += len(f"==={label}===")
-        remaining = ["TAILORED_CV", "COVER_LETTER", "INTERVIEW_PREP", "ACCEPTANCE_CHANCE"]
-        end = len(response)
-        for other in remaining:
-            if other == label:
-                continue
-            pos = response.find(f"==={other}===", start)
-            if pos != -1 and pos < end:
-                end = pos
-        return response[start:end].strip()
-
-    cv = extract_delimiter("TAILORED_CV")
-    cl = extract_delimiter("COVER_LETTER")
-    prep = extract_delimiter("INTERVIEW_PREP")
-    chance = extract_delimiter("ACCEPTANCE_CHANCE")
+    cv = extract_delimited(response, "TAILORED_CV")
+    cl = extract_delimited(response, "COVER_LETTER")
+    prep = extract_delimited(response, "INTERVIEW_PREP")
+    chance = extract_delimited(response, "ACCEPTANCE_CHANCE")
 
     if not cv:
         cv = response
     if not cl:
-        cl = ""
-    if not prep:
-        prep = ""
+        log.info("  Cover letter not found in response, generating separately...")
+        cl_prompt = build_cover_letter_prompt(profile, job, cv_text)
+        cl = query_groq(cl_prompt, f"Write a cover letter for {job['title']} at {job['company']}.", model=MODEL)
+
     try:
-        chance_num = int("".join(c for c in chance if c.isdigit()))
-        chance_num = max(0, min(100, chance_num))
+        chance_num = extract_score(chance)
     except (ValueError, TypeError):
         chance_num = 50
 
-    return cv, cl, prep, chance_num
+    return cv, cl, prep, chance_num, profile
 
 
-# ── DOCX generation ────────────────────────────────────────────────────────────
+SKILL_CATEGORIES = [
+    "Data Analytics:", "Visualization & Reporting:",
+    "AI / ML & GenAI:", "Other Skills:",
+    "Programming:", "Agentic AI:", "SAP & ERP:",
+    "Finance & Accounting:"
+]
+
+_MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_DATE_PATTERN = re.compile(
+    rf"{_MONTHS}\s+\d{{4}}\s*(?:[–—-]|to|–|—)\s*{_MONTHS}\s+\d{{4}}"
+)
+_BODY_FONT = "Calibri"
+_HEADING_FONT = "Calibri"
+_BODY_SIZE = Pt(11)
+_HEADING_SIZE = Pt(14)
+_SUBHEADING_SIZE = Pt(12)
+_CONTACT_SIZE = Pt(9)
+_SECTION_HEADING_SIZE = Pt(13)
+_NAVY = RGBColor(0x1F, 0x3A, 0x5F)
+_DARK_GRAY = RGBColor(0x55, 0x55, 0x55)
+
 
 def _set_keep_with_next(paragraph):
     pPr = paragraph._p.get_or_add_pPr()
@@ -287,62 +234,57 @@ def _set_keep_with_next(paragraph):
 
 def _add_section_heading(doc, text: str):
     p = doc.add_paragraph()
-    p.space_before = Pt(14)
+    p.space_before = Pt(16)
     p.space_after = Pt(6)
     run = p.add_run(text.upper())
     run.bold = True
-    run.font.size = Pt(12)
-    run.font.color.rgb = RGBColor(0x1F, 0x3A, 0x5F)
-    run.font.name = "Calibri"
+    run.font.size = _SECTION_HEADING_SIZE
+    run.font.color.rgb = _NAVY
+    run.font.name = _HEADING_FONT
     pPr = p._p.get_or_add_pPr()
     pBdr = OxmlElement('w:pBdr')
     bottom = OxmlElement('w:bottom')
     bottom.set(qn('w:val'), 'single')
-    bottom.set(qn('w:sz'), '4')
+    bottom.set(qn('w:sz'), '6')
     bottom.set(qn('w:color'), '1F3A5F')
-    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:space'), '2')
     pBdr.append(bottom)
     pPr.append(pBdr)
     _set_keep_with_next(p)
 
 
-def _add_body(doc, text: str, bold: bool = False, size: int = 11, space_after: int = 3):
+def _add_body(doc, text: str, bold: bool = False, size=None, space_after: int = 4, alignment=None, color=None):
+    if size is None:
+        size = _BODY_SIZE
     p = doc.add_paragraph()
     p.space_after = Pt(space_after)
     p.space_before = Pt(0)
+    if alignment:
+        p.alignment = alignment
     run = p.add_run(text)
-    run.font.size = Pt(size)
-    run.font.name = "Calibri"
+    run.font.size = size
+    run.font.name = _BODY_FONT
     run.bold = bold
+    if color:
+        run.font.color.rgb = color
     return p
 
 
-def _add_bullet(doc, text: str, size: int = 10.5):
+def _add_bullet(doc, text: str, size=None):
+    if size is None:
+        size = _BODY_SIZE
     p = doc.add_paragraph(style='List Bullet')
     p.clear()
     run = p.add_run(text)
-    run.font.size = Pt(size)
-    run.font.name = "Calibri"
+    run.font.size = size
+    run.font.name = _BODY_FONT
     p.space_after = Pt(1)
     p.space_before = Pt(0)
+    p.paragraph_format.left_indent = Inches(0.25)
     return p
 
 
-# ── Skill category labels ─────────────────────────────────────────────────
-SKILL_CATEGORIES = [
-    "Data Analytics:", "Visualization & Reporting:",
-    "AI / ML & GenAI:", "Other Skills:"
-]
-
-# ── Date pattern for company line detection ──────────────────────────────
-_MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-_DATE_PATTERN = re.compile(
-    rf"{_MONTHS}\s+\d{{4}}\s*(?:[–—-]|to|–|—)\s*{_MONTHS}\s+\d{{4}}"
-)
-
-
 def _split_skill_items(text: str) -> list:
-    """Split comma-separated skill items, respecting parenthesised groups."""
     items = []
     depth = 0
     buf = []
@@ -364,13 +306,11 @@ def _split_skill_items(text: str) -> list:
 
 
 def _expand_skill_categories(lines: list) -> list:
-    """Expand inline skill category lines into separate label + bullet items."""
     result = []
     i = 0
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
-
         matching_cat = None
         for cat in SKILL_CATEGORIES:
             upper = stripped.upper()
@@ -378,7 +318,6 @@ def _expand_skill_categories(lines: list) -> list:
             if upper.startswith(cat_key) and (len(stripped) == len(cat_key) or stripped[len(cat_key):].lstrip().startswith(":")):
                 matching_cat = cat
                 break
-
         if matching_cat:
             label = matching_cat
             rest = stripped[len(label.rstrip(":")):].lstrip(": ")
@@ -396,7 +335,6 @@ def _expand_skill_categories(lines: list) -> list:
 
 
 def _has_date_range(text: str) -> bool:
-    """Check if text contains a date range like 'Sep 2021 – Nov 2025'."""
     return bool(_DATE_PATTERN.search(text))
 
 
@@ -417,7 +355,6 @@ def _is_role_title(text: str, prev_was_company: bool) -> bool:
 
 
 def _split_contact(lines: list) -> list:
-    """Split combined contact line into 2 rows: email|phone|github and linkedin|greatlearning."""
     result = []
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -450,7 +387,6 @@ def _split_contact(lines: list) -> list:
 
 
 def _add_date_sep(txt: str) -> str:
-    """Insert | before Month Year in certification lines: 'Name May 2012 | 55%' → 'Name | May 2012 | 55%'."""
     m = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{4}\b', txt)
     if m:
         idx = m.start()
@@ -465,7 +401,6 @@ def _add_date_sep(txt: str) -> str:
 
 
 def _normalize_edu_cert(lines: list) -> list:
-    """Standardize Education and Certification section content."""
     result = []
     in_edu = False
     in_certs = False
@@ -486,13 +421,11 @@ def _normalize_edu_cert(lines: list) -> list:
             in_certs = False
             result.append(line)
             continue
-
         if in_edu or in_certs:
             txt = stripped.lstrip("-•* ").strip()
             if not txt:
                 continue
             txt = txt.replace("\u2013", "-").replace("\u2014", "-")
-            # Split combined Chartered Accountancy line
             if in_certs and "Chartered Accountancy" in txt and "CPT" in txt:
                 parts = txt.split(";")
                 for pi, pt in enumerate(parts):
@@ -519,34 +452,31 @@ def _normalize_edu_cert(lines: list) -> list:
 def save_docx(text: str, path: str):
     doc = Document()
     style = doc.styles['Normal']
-    style.font.name = 'Calibri'
-    style.font.size = Pt(10.5)
+    style.font.name = _BODY_FONT
+    style.font.size = _BODY_SIZE
     style.paragraph_format.space_after = Pt(2)
     style.paragraph_format.space_before = Pt(0)
 
     section_keywords = [
         "PROFESSIONAL SUMMARY", "TECHNICAL SKILLS", "WORK EXPERIENCE",
         "GITHUB PROJECTS", "EDUCATION", "CERTIFICATIONS",
-        "PROFESSIONAL SUMMARY:", "TECHNICAL SKILLS:", "WORK EXPERIENCE:",
-        "GITHUB PROJECTS:", "EDUCATION:", "CERTIFICATIONS:"
     ]
 
     def which_section(line: str):
-        u = line.strip().upper()
+        u = line.strip().upper().rstrip(":")
         for kw in section_keywords:
-            if u.startswith(kw) or u == kw:
-                k = kw.rstrip(":")
-                if k.startswith("PROFESSIONAL"):
+            if u == kw or u.startswith(kw):
+                if kw.startswith("PROFESSIONAL"):
                     return "summary"
-                if k.startswith("TECHNICAL"):
+                if kw.startswith("TECHNICAL"):
                     return "skills"
-                if k.startswith("WORK"):
+                if kw.startswith("WORK"):
                     return "work"
-                if k.startswith("GITHUB"):
+                if kw.startswith("GITHUB"):
                     return "projects"
-                if k.startswith("EDUCATION"):
+                if kw.startswith("EDUCATION"):
                     return "education"
-                if k.startswith("CERTIFICATION"):
+                if kw.startswith("CERTIFICATION"):
                     return "certs"
         return None
 
@@ -574,22 +504,21 @@ def save_docx(text: str, path: str):
             p.space_after = Pt(2)
             run = p.add_run(line)
             run.bold = True
-            run.font.size = Pt(16)
-            run.font.name = "Calibri"
-            run.font.color.rgb = RGBColor(0x1F, 0x3A, 0x5F)
+            run.font.size = Pt(20)
+            run.font.name = _HEADING_FONT
+            run.font.color.rgb = _NAVY
             name_done = True
             i += 1
             continue
 
-        # Contact lines: only match before encountering any section heading
         if name_done and contact_lines < 2 and not which_section(line) and len(line) < 200:
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.space_after = Pt(2) if contact_lines == 0 else Pt(6)
+            p.space_after = Pt(2) if contact_lines == 0 else Pt(8)
             run = p.add_run(line)
-            run.font.size = Pt(9)
-            run.font.name = "Calibri"
-            run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+            run.font.size = _CONTACT_SIZE
+            run.font.name = _BODY_FONT
+            run.font.color.rgb = _DARK_GRAY
             contact_lines += 1
             i += 1
             continue
@@ -598,13 +527,13 @@ def save_docx(text: str, path: str):
         if sec:
             _add_section_heading(doc, line.rstrip(":"))
             current_section = sec
-            contact_lines = 2  # stop contact matching after first heading
+            contact_lines = 2
             prev_was_company = False
             i += 1
             continue
 
         if current_section == "summary":
-            _add_body(doc, line, size=10.5, space_after=3)
+            _add_body(doc, line, size=Pt(10.5), space_after=4)
             i += 1
             continue
 
@@ -619,14 +548,16 @@ def save_docx(text: str, path: str):
             if matched_cat:
                 p = doc.add_paragraph()
                 p.space_after = Pt(2)
+                p.space_before = Pt(6)
                 run = p.add_run(matched_cat)
                 run.bold = True
                 run.font.size = Pt(10.5)
-                run.font.name = "Calibri"
+                run.font.name = _BODY_FONT
+                run.font.color.rgb = _NAVY
             else:
                 txt = line.lstrip("-•* ").strip()
                 if txt:
-                    _add_bullet(doc, txt)
+                    _add_bullet(doc, txt, size=Pt(10))
             i += 1
             continue
 
@@ -635,68 +566,66 @@ def save_docx(text: str, path: str):
             if _has_date_range(clean) or _has_date_range(line):
                 txt = clean.replace("**", "")
                 p = doc.add_paragraph()
-                p.space_before = Pt(10) if not prev_was_company else Pt(2)
+                p.space_before = Pt(12) if not prev_was_company else Pt(2)
                 p.space_after = Pt(1)
                 run = p.add_run(txt)
                 run.bold = True
                 run.font.size = Pt(10.5)
-                run.font.name = "Calibri"
+                run.font.name = _BODY_FONT
                 _set_keep_with_next(p)
                 prev_was_company = True
             elif _is_role_title(clean, prev_was_company) or _is_role_title(line, prev_was_company):
                 txt = clean.replace("**", "").strip()
-                p = _add_body(doc, txt, bold=True, size=10.5, space_after=2)
+                p = _add_body(doc, txt, bold=True, size=Pt(10.5), space_after=2)
                 _set_keep_with_next(p)
                 prev_was_company = False
             else:
                 txt = clean
                 if txt:
-                    _add_bullet(doc, txt)
+                    _add_bullet(doc, txt, size=Pt(10))
                     prev_was_company = False
             i += 1
             continue
 
         if current_section == "projects":
             if line.startswith("Project ") and ":" in line:
-                p = _add_body(doc, line, bold=True, size=10.5, space_after=2)
+                p = _add_body(doc, line, bold=True, size=Pt(10.5), space_after=2)
                 _set_keep_with_next(p)
             elif line.startswith("Technologies:") or line.startswith("GitHub:"):
-                _add_body(doc, line, bold=False, size=10.5, space_after=2)
+                _add_body(doc, line, size=Pt(10), space_after=2)
             else:
                 txt = line.lstrip("-•* ").strip()
                 if txt:
-                    _add_bullet(doc, txt)
+                    _add_bullet(doc, txt, size=Pt(10))
             i += 1
             continue
 
         if current_section == "education":
             txt = line.lstrip("-•* ").strip()
             if txt:
-                _add_bullet(doc, txt)
+                _add_bullet(doc, txt, size=Pt(10))
             i += 1
             continue
 
         if current_section == "certs":
             txt = line.lstrip("-•* ").strip()
             if txt:
-                _add_bullet(doc, txt)
+                _add_bullet(doc, txt, size=Pt(10))
             i += 1
             continue
 
         if line.startswith("-") or line.startswith("•") or line.startswith("*"):
             txt = line.lstrip("-•* ").strip()
             if txt:
-                _add_bullet(doc, txt)
+                _add_bullet(doc, txt, size=Pt(10))
         elif line.startswith("**") and line.endswith("**") and len(line) > 4:
-            _add_body(doc, line.replace("**", ""), bold=True, size=10.5, space_after=3)
+            _add_body(doc, line.replace("**", ""), bold=True, size=_BODY_SIZE, space_after=3)
         else:
-            _add_body(doc, line, size=10.5, space_after=3)
+            _add_body(doc, line, size=Pt(10.5), space_after=3)
         i += 1
 
     doc.save(path)
 
-
-# ── PDF generation ─────────────────────────────────────────────────────────────
 
 def save_pdf(text: str, path: str):
     pdf = FPDF()
@@ -704,33 +633,30 @@ def save_pdf(text: str, path: str):
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_font("DejaVu", "", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
     pdf.add_font("DejaVu", "B", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-    pdf.set_margins(20, 20, 20)
+    pdf.set_margins(20, 18, 20)
     lm = pdf.l_margin
     avail_w = pdf.w - lm - pdf.r_margin
 
     section_keywords = [
         "PROFESSIONAL SUMMARY", "TECHNICAL SKILLS", "WORK EXPERIENCE",
         "GITHUB PROJECTS", "EDUCATION", "CERTIFICATIONS",
-        "PROFESSIONAL SUMMARY:", "TECHNICAL SKILLS:", "WORK EXPERIENCE:",
-        "GITHUB PROJECTS:", "EDUCATION:", "CERTIFICATIONS:"
     ]
 
     def which_section(line: str):
-        u = line.strip().upper()
+        u = line.strip().upper().rstrip(":")
         for kw in section_keywords:
-            if u.startswith(kw) or u == kw:
-                k = kw.rstrip(":")
-                if k.startswith("PROFESSIONAL"):
+            if u == kw or u.startswith(kw):
+                if kw.startswith("PROFESSIONAL"):
                     return "summary"
-                if k.startswith("TECHNICAL"):
+                if kw.startswith("TECHNICAL"):
                     return "skills"
-                if k.startswith("WORK"):
+                if kw.startswith("WORK"):
                     return "work"
-                if k.startswith("GITHUB"):
+                if kw.startswith("GITHUB"):
                     return "projects"
-                if k.startswith("EDUCATION"):
+                if kw.startswith("EDUCATION"):
                     return "education"
-                if k.startswith("CERTIFICATION"):
+                if kw.startswith("CERTIFICATION"):
                     return "certs"
         return None
 
@@ -752,39 +678,37 @@ def save_pdf(text: str, path: str):
             i += 1
             continue
 
-        # ── Name ─────────────────────────────────────────────────────
         if not name_done and line == "Heena Kausher":
-            pdf.set_font("DejaVu", "B", 16)
+            pdf.set_font("DejaVu", "B", 18)
             pdf.set_text_color(0x1F, 0x3A, 0x5F)
-            pdf.cell(avail_w, 10, line, new_x="LMARGIN", new_y="NEXT", align="C")
+            pdf.cell(avail_w, 11, line, new_x="LMARGIN", new_y="NEXT", align="C")
             pdf.set_text_color(0, 0, 0)
             name_done = True
             i += 1
             continue
 
-        # ── Contact lines ───────────────────────────────────────────
         if name_done and contact_lines < 2 and len(line) < 200 and not which_section(line):
             pdf.set_font("DejaVu", "", 8)
             pdf.set_text_color(0x55, 0x55, 0x55)
-            pdf.cell(avail_w, 6, line, new_x="LMARGIN", new_y="NEXT", align="C")
+            pdf.cell(avail_w, 5.5, line, new_x="LMARGIN", new_y="NEXT", align="C")
             pdf.set_text_color(0, 0, 0)
-            pdf.ln(2) if contact_lines == 1 else pdf.ln(0)
+            if contact_lines == 1:
+                pdf.ln(3)
             contact_lines += 1
             i += 1
             continue
 
-        # ── Section headings ────────────────────────────────────────
         sec = which_section(line)
         if sec:
-            if pdf.h - pdf.b_margin - pdf.get_y() < 35:
+            if pdf.h - pdf.b_margin - pdf.get_y() < 40:
                 pdf.add_page()
-            pdf.ln(2)
-            pdf.set_font("DejaVu", "B", 11)
+            pdf.ln(3)
+            pdf.set_font("DejaVu", "B", 12)
             pdf.set_text_color(0x1F, 0x3A, 0x5F)
             pdf.set_x(lm)
             pdf.cell(avail_w, 7, line.rstrip(":").upper(), new_x="LMARGIN", new_y="NEXT")
             pdf.set_draw_color(0x1F, 0x3A, 0x5F)
-            pdf.set_line_width(0.3)
+            pdf.set_line_width(0.4)
             y_line = pdf.get_y()
             pdf.line(lm, y_line, pdf.w - pdf.r_margin, y_line)
             pdf.ln(2)
@@ -795,23 +719,13 @@ def save_pdf(text: str, path: str):
             i += 1
             continue
 
-        # ── PROFESSIONAL SUMMARY → Normal body ──────────────────────
         if current_section == "summary":
             pdf.set_font("DejaVu", "", 9.5)
             pdf.set_x(lm)
-            try:
-                pdf.multi_cell(avail_w, 5.5, line)
-            except Exception:
-                for word in line.split():
-                    pdf.set_x(lm)
-                    try:
-                        pdf.multi_cell(avail_w, 5.5, word)
-                    except Exception:
-                        pass
+            pdf.multi_cell(avail_w, 5.5, line)
             i += 1
             continue
 
-        # ── TECHNICAL SKILLS ────────────────────────────────────────
         if current_section == "skills":
             matched_cat = None
             for cat in SKILL_CATEGORIES:
@@ -822,8 +736,10 @@ def save_pdf(text: str, path: str):
                     break
             if matched_cat:
                 pdf.set_font("DejaVu", "B", 10)
+                pdf.set_text_color(0x1F, 0x3A, 0x5F)
                 pdf.set_x(lm)
                 pdf.cell(avail_w, 5.5, matched_cat, new_x="LMARGIN", new_y="NEXT")
+                pdf.set_text_color(0, 0, 0)
             else:
                 txt = line.lstrip("-•* ").strip()
                 if txt:
@@ -836,12 +752,11 @@ def save_pdf(text: str, path: str):
             i += 1
             continue
 
-        # ── WORK EXPERIENCE ─────────────────────────────────────────
         if current_section == "work":
             clean = line.lstrip("-•* ").strip()
             if _has_date_range(clean) or _has_date_range(line):
                 txt = clean.replace("**", "")
-                if pdf.h - pdf.b_margin - pdf.get_y() < 25:
+                if pdf.h - pdf.b_margin - pdf.get_y() < 30:
                     pdf.add_page()
                 pdf.ln(1) if not prev_was_company else pdf.ln(0)
                 pdf.set_font("DejaVu", "B", 10)
@@ -867,18 +782,19 @@ def save_pdf(text: str, path: str):
             i += 1
             continue
 
-        # ── GITHUB PROJECTS ─────────────────────────────────────────
         if current_section == "projects":
             if line.startswith("Project ") and ":" in line:
-                if pdf.h - pdf.b_margin - pdf.get_y() < 20:
+                if pdf.h - pdf.b_margin - pdf.get_y() < 25:
                     pdf.add_page()
                 pdf.set_font("DejaVu", "B", 10)
                 pdf.set_x(lm)
                 pdf.cell(avail_w, 5.5, line, new_x="LMARGIN", new_y="NEXT")
             elif line.startswith("Technologies:") or line.startswith("GitHub:"):
-                pdf.set_font("DejaVu", "", 9.5)
+                pdf.set_font("DejaVu", "", 9)
+                pdf.set_text_color(0x55, 0x55, 0x55)
                 pdf.set_x(lm)
-                pdf.multi_cell(avail_w, 5.5, line)
+                pdf.multi_cell(avail_w, 5, line)
+                pdf.set_text_color(0, 0, 0)
             else:
                 txt = line.lstrip("-•* ").strip()
                 if txt:
@@ -891,7 +807,6 @@ def save_pdf(text: str, path: str):
             i += 1
             continue
 
-        # ── EDUCATION → all as bullets ──────────────────────────────
         if current_section == "education":
             txt = line.lstrip("-•* ").strip()
             if txt:
@@ -904,7 +819,6 @@ def save_pdf(text: str, path: str):
             i += 1
             continue
 
-        # ── CERTIFICATIONS → all as bullets ─────────────────────────
         if current_section == "certs":
             txt = line.lstrip("-•* ").strip()
             if txt:
@@ -917,7 +831,6 @@ def save_pdf(text: str, path: str):
             i += 1
             continue
 
-        # ── Fallback ────────────────────────────────────────────────
         if line.startswith("-") or line.startswith("•") or line.startswith("*"):
             txt = line.lstrip("-•* ").strip()
             if txt:
@@ -934,21 +847,11 @@ def save_pdf(text: str, path: str):
         else:
             pdf.set_font("DejaVu", "", 9.5)
             pdf.set_x(lm)
-            try:
-                pdf.multi_cell(avail_w, 5.5, line)
-            except Exception:
-                for word in line.split():
-                    pdf.set_x(lm)
-                    try:
-                        pdf.multi_cell(avail_w, 5.5, word)
-                    except Exception:
-                        pass
+            pdf.multi_cell(avail_w, 5.5, line)
         i += 1
 
     pdf.output(path)
 
-
-# ── Output migration ──────────────────────────────────────────────────────────
 
 def migrate_outputs_to_dated_dirs():
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -972,8 +875,6 @@ def migrate_outputs_to_dated_dirs():
             log.warning("  Skip move outputs/%s -> %s (target exists)", name, target)
 
 
-# ── Job processing ─────────────────────────────────────────────────────────────
-
 def process_job(job: dict, cv_text: str, output_base: str) -> tuple:
     company = job["company"]
     title = job["title"]
@@ -983,10 +884,20 @@ def process_job(job: dict, cv_text: str, output_base: str) -> tuple:
 
     log.info("  Generating CV + cover letter + prep info...")
     try:
-        cv_text_tailored, cl_text, prep_text, chance_num = generate_for_job(job, cv_text)
+        cv_text_tailored, cl_text, prep_text, chance_num, profile = generate_for_job(job, cv_text)
     except Exception as e:
         log.error("  FAILED: %s", e)
         return False, None, None, None
+
+    log.info("  Running quality review pass...")
+    try:
+        cv_text_tailored = review_and_improve(
+            cv_text_tailored,
+            job.get('title', ''),
+            job.get('description', '')
+        )
+    except Exception as e:
+        log.warning("  Quality review skipped: %s", e)
 
     save_docx(cv_text_tailored, os.path.join(folder_path, "tailored_cv.docx"))
     save_pdf(cv_text_tailored, os.path.join(folder_path, "tailored_cv.pdf"))
@@ -996,8 +907,6 @@ def process_job(job: dict, cv_text: str, output_base: str) -> tuple:
     log.info("  OK -> %s/", folder_name)
     return True, prep_text, chance_num, folder_name
 
-
-# ── Scraper helpers ─────────────────────────────────────────────────────────
 
 def run_scraper_for_locations(scraper_module, name: str, pages: int = 2, locations: list = None):
     total_jobs = []
@@ -1030,8 +939,6 @@ def log_scraper_results(name: str, jobs: list, added: int):
             log.info("  %s @ %s [%s]", j["title"], j["company"], j.get("category", "N/A"))
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-
 def main():
     timer_start()
 
@@ -1045,7 +952,6 @@ def main():
     any_fetch = False
     only_mode = False
 
-    # ── Naukri ──────────────────────────────────────────────────────────
     if "--fetch-naukri" in sys.argv:
         any_fetch = True
         jobs, added = run_scraper_for_locations(naukri_scraper, "Naukri", locations=locations)
@@ -1053,7 +959,6 @@ def main():
         if "--only-naukri" in sys.argv:
             only_mode = True
 
-    # ── Indeed ──────────────────────────────────────────────────────────
     if "--fetch-indeed" in sys.argv:
         any_fetch = True
         jobs, added = run_scraper_for_locations(indeed_scraper, "Indeed", locations=locations)
@@ -1061,7 +966,6 @@ def main():
         if "--only-indeed" in sys.argv:
             only_mode = True
 
-    # ── LinkedIn ────────────────────────────────────────────────────────
     if "--fetch-linkedin" in sys.argv:
         any_fetch = True
         jobs, added = run_scraper_for_locations(linkedin_scraper, "LinkedIn", locations=locations)
@@ -1077,7 +981,6 @@ def main():
     if any_fetch and not only_mode:
         log.info("Continuing with full pipeline...\n")
 
-    # ── Auto-score ──────────────────────────────────────────────────────
     if "--auto-score" in sys.argv:
         log.info("Running auto-scorer on unscored jobs...")
         try:
@@ -1105,7 +1008,6 @@ def main():
     log.info("%s", "-" * 86)
     log.info("=" * 80)
 
-    # ── Google Sheets auth ──────────────────────────────────────────────
     log.info("Getting Google Sheets token...")
     sheets_token = None
     try:
