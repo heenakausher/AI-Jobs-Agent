@@ -3,13 +3,16 @@ import logging
 import os
 import time
 from groq_api import query_groq
+from config import SCORE_CACHE, JOBS_JSON, CV_FILE, SCORING_MODEL
 
 log = logging.getLogger("agent")
 
-SCORE_CACHE = "score_cache.json"
-ALL_ROLES_FILE = "processed_jobs.json"
-CV_FILE = "enhanced_cv.txt"
-MODEL = "llama-3.3-70b-versatile"
+MODEL = SCORING_MODEL
+ALL_ROLES_FILE = JOBS_JSON
+CV_FILE_PATH = CV_FILE
+SCORE_CACHE_PATH = SCORE_CACHE
+
+_last_stats = {"jobs_scored": 0, "recommended": 0}
 
 SCORING_PROMPT = """You are an expert ATS and career coach evaluating how well a candidate's profile matches a job description.
 
@@ -78,7 +81,11 @@ DESCRIPTION:
     return 0, "Auto-score failed"
 
 
-def score_all_unscored(cv_path: str = CV_FILE, all_roles_path: str = ALL_ROLES_FILE, score_cache_path: str = SCORE_CACHE) -> int:
+def get_last_stats():
+    return dict(_last_stats)
+
+
+def score_all_unscored(cv_path: str = CV_FILE_PATH, all_roles_path: str = ALL_ROLES_FILE, score_cache_path: str = SCORE_CACHE_PATH) -> int:
     cv_text = open(cv_path, "r", encoding="utf-8").read()
     all_jobs = load_json(all_roles_path)
     existing_scores = load_json(score_cache_path)
@@ -123,6 +130,11 @@ def score_all_unscored(cv_path: str = CV_FILE, all_roles_path: str = ALL_ROLES_F
         existing_scores.extend(new_scores)
         save_json(score_cache_path, existing_scores)
         log.info("Added %s new scores to %s", len(new_scores), score_cache_path)
+
+    _last_stats["jobs_scored"] = len(new_scores)
+
+    good = [s for s in existing_scores if isinstance(s.get("score"), int) and s["score"] > 6]
+    _last_stats["recommended"] = len(good)
 
     return len(new_scores)
 

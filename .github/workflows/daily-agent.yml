@@ -16,7 +16,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Persist credentials so the auto-commit step can push back
           persist-credentials: true
 
       - name: Setup Python 3.10
@@ -116,14 +115,29 @@ jobs:
           echo "Outputs:"
           find outputs || true
 
-
-      # ── Upload generated files as artifact ──────────────────────────
+      # ── Upload generated outputs as artifact ────────────────────────
       - name: Upload generated outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: generated-files-${{ github.run_id }}
           path: outputs/**
+          if-no-files-found: ignore
+
+      # ── Upload logs and stats as artifact ───────────────────────────
+      - name: Upload logs and stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-logs-${{ github.run_id }}
+          path: |
+            agent.log
+            agent_stats.json
+            processed_jobs.json
+            score_cache.json
+            generation_progress.json
+            scraper_health.json
+            stats_report.html
           if-no-files-found: ignore
 
       # ── Commit updated cache back to repository ─────────────────────

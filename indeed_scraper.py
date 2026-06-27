@@ -2,11 +2,20 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from config import (
+    get_expanded_searches, CITIES, EXPERIENCE_LEVELS,
+    MAX_PAGES, CONCURRENT_WORKERS,
+    RATE_LIMIT_INDEED, MAX_RETRIES_SCRAPER, REQUEST_TIMEOUT,
+    JOBS_JSON
+)
 
 log = logging.getLogger("agent")
 
@@ -21,27 +30,26 @@ HEADERS = {
     "DNT": "1",
 }
 
-INDEED_SEARCHES = [
-    {"keyword": "Data Analyst", "category": "data_analyst"},
-    {"keyword": "Business Analyst", "category": "data_analyst"},
-    {"keyword": "Business Intelligence", "category": "data_analyst"},
-    {"keyword": "Data Analytics", "category": "data_analyst"},
-    {"keyword": "Power BI", "category": "data_analyst"},
-    {"keyword": "Financial Analyst", "category": "finance_roles"},
-    {"keyword": "Finance", "category": "finance_roles"},
-    {"keyword": "SAP FICO", "category": "finance_roles"},
-    {"keyword": "Agentic AI", "category": "agentic_ai"},
-    {"keyword": "AI Engineer", "category": "agentic_ai"},
-    {"keyword": "Machine Learning", "category": "agentic_ai"},
-    {"keyword": "GenAI", "category": "agentic_ai"},
-    {"keyword": "LLM", "category": "agentic_ai"},
-    {"keyword": "RAG", "category": "agentic_ai"},
-    {"keyword": "AI Intern", "category": "fresher_ai_ml"},
-    {"keyword": "Finance Intern", "category": "fresher_ai_ml"},
-]
-
-ALL_ROLES_FILE = "processed_jobs.json"
+ALL_ROLES_FILE = JOBS_JSON
 INDEED_OUTPUT = "indeed_jobs.json"
+
+_last_stats = {
+    "queries": 0, "pages": 0, "jobs_found": 0,
+    "duplicates": 0, "new_jobs": 0, "failed_requests": 0,
+    "total_duration": 0.0, "durations": [],
+}
+
+_rate_limiter = threading.Lock()
+_last_request_time = 0.0
+
+
+def _rate_limit():
+    global _last_request_time
+    with _rate_limiter:
+        elapsed = time.time() - _last_request_time
+        if elapsed < RATE_LIMIT_INDEED:
+            time.sleep(RATE_LIMIT_INDEED - elapsed)
+        _last_request_time = time.time()
 
 
 def _fetch_url(url: str, headers: dict = None, max_retries: int = 2) -> str:
@@ -49,8 +57,9 @@ def _fetch_url(url: str, headers: dict = None, max_retries: int = 2) -> str:
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
+            _rate_limit()
             req = urllib.request.Request(url, headers=h)
-            resp = urllib.request.urlopen(req, timeout=30)
+            resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
             html = resp.read()
             try:
                 return html.decode("utf-8")
@@ -59,11 +68,13 @@ def _fetch_url(url: str, headers: dict = None, max_retries: int = 2) -> str:
         except urllib.error.HTTPError as e:
             last_err = f"HTTP {e.code}"
             if e.code in (403, 429):
+                log.warning("  Indeed HTTP %s, retrying (%s/%s)...", e.code, attempt, max_retries)
                 time.sleep(3)
                 continue
             break
         except Exception as e:
             last_err = str(e)
+            log.warning("  Indeed fetch error (%s/%s): %s", attempt, max_retries, e)
             time.sleep(2)
             continue
     log.warning("  Failed to fetch %s: %s", url, last_err)
@@ -82,6 +93,14 @@ def _extract_json_from_script(html: str, pattern: str) -> dict:
     return {}
 
 
+def _clean_html(text: str) -> str:
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
 def search_indeed(keyword: str, location: str = "Hyderabad", start: int = 0) -> list:
     params = {
         "q": keyword,
@@ -90,16 +109,18 @@ def search_indeed(keyword: str, location: str = "Hyderabad", start: int = 0) -> 
         "sort": "date",
     }
     url = f"{INDEED_BASE}/jobs?{urllib.parse.urlencode(params)}"
+
+    log.debug("  Indeed: city=%s role=%s start=%s", location, keyword, start)
+    log.debug("  URL: %s", url)
+
     html = _fetch_url(url)
     if not html:
         return []
 
     jobs = []
-
     jobs.extend(_parse_from_mosaic_data(html, keyword, location))
     if jobs:
         return jobs
-
     jobs.extend(_parse_from_html_cards(html, keyword, location))
     return jobs
 
@@ -142,6 +163,7 @@ def _parse_from_mosaic_data(html: str, keyword: str, location: str) -> list:
                 "job_key": jk,
                 "description": desc,
                 "keyword": keyword,
+                "url": f"{INDEED_BASE}/viewjob?jk={jk}",
             })
         return parsed
     return []
@@ -222,15 +244,8 @@ def _parse_single_card(card_html: str, keyword: str, location: str) -> dict:
         "job_key": jk,
         "description": snippet or f"Position: {title} at {company}",
         "keyword": keyword,
+        "url": f"{INDEED_BASE}/viewjob?jk={jk}" if jk else "",
     }
-
-
-def _clean_html(text: str) -> str:
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-    text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
 
 
 def fetch_job_description(job_key: str) -> str:
@@ -268,13 +283,14 @@ def fetch_job_description(job_key: str) -> str:
     return ""
 
 
-def transform_indeed_job(raw: dict, category: str = "data_analyst") -> dict:
+def transform_indeed_job(raw: dict, category: str = "data_analyst", keyword: str = "") -> dict:
     title = raw.get("title", "Unknown Position")
     company = raw.get("company", "Unknown Company")
     location = raw.get("location", "Hyderabad, India")
     job_id = raw.get("job_id", "")
     description = raw.get("description", "")
     job_key = raw.get("job_key", "")
+    url = raw.get("url", "")
 
     if job_key and not description:
         log.info("    Fetching description for %s @ %s...", title, company)
@@ -291,40 +307,101 @@ def transform_indeed_job(raw: dict, category: str = "data_analyst") -> dict:
         "date": date_str,
         "job_id": job_id,
         "description": description,
-        "_source": "Indeed",
+        "url": url,
+        "source": "Indeed",
     }
 
 
-def fetch_all(location: str = "Hyderabad", pages_per_search: int = 2) -> list:
+def _search_combo(keyword: str, category: str, city: str, pages_per_search: int) -> list:
+    log.info("  Indeed: city=%s role=%s", city, keyword)
+    start_ts = time.time()
     seen_ids = set()
-    all_transformed = []
+    all_jobs = []
 
-    for search in INDEED_SEARCHES:
-        kw = search["keyword"]
-        cat = search["category"]
-        log.info("Searching Indeed for '%s' (%s)...", kw, cat)
+    for page in range(pages_per_search):
+        start = page * 10
+        raw_jobs = search_indeed(keyword, city, start=start)
+        if not raw_jobs:
+            if page == 0:
+                log.debug("  No results for '%s' at %s", keyword, city)
+            break
 
-        for page in range(pages_per_search):
-            start = page * 10
-            raw_jobs = search_indeed(kw, location, start=start)
-            if not raw_jobs:
-                if page == 0:
-                    log.warning("  No results for '%s'", kw)
-                break
+        for raw in raw_jobs:
+            jid = raw.get("job_id", "")
+            if jid in seen_ids:
+                continue
+            seen_ids.add(jid)
+            transformed = transform_indeed_job(raw, category=category, keyword=keyword)
+            all_jobs.append(transformed)
 
-            for raw in raw_jobs:
-                jid = raw.get("job_id", "")
-                if jid in seen_ids:
-                    continue
-                seen_ids.add(jid)
+        _last_stats["pages"] += 1
+        log.debug("  Page %s: %s jobs (total unique: %s)", page + 1, len(raw_jobs), len(all_jobs))
 
-                transformed = transform_indeed_job(raw, category=cat)
-                all_transformed.append(transformed)
+    duration = time.time() - start_ts
+    log.info("  Indeed: city=%s role=%s → %s jobs (%.1fs)", city, keyword, len(all_jobs), duration)
+    _last_stats["queries"] += 1
+    _last_stats["jobs_found"] += len(all_jobs)
 
-            log.info("  Page %s: %s jobs (total unique: %s)", page + 1, len(raw_jobs), len(all_transformed))
-            time.sleep(2)
+    return all_jobs
 
-    return all_transformed
+
+def fetch_all(location=None, pages_per_search=None, experience=None):
+    global _last_stats
+    _last_stats = {
+        "queries": 0, "pages": 0, "jobs_found": 0,
+        "duplicates": 0, "new_jobs": 0, "failed_requests": 0,
+        "total_duration": 0.0, "durations": [],
+    }
+
+    if pages_per_search is None:
+        pages_per_search = MAX_PAGES
+
+    searches = get_expanded_searches()
+    cities = [location] if location else CITIES
+
+    all_jobs = []
+    seen_ids = set()
+
+    combos = [(s["keyword"], s["category"], c)
+              for s in searches
+              for c in cities]
+
+    start_all = time.time()
+
+    with ThreadPoolExecutor(max_workers=CONCURRENT_WORKERS) as executor:
+        futures = {}
+        for keyword, category, city in combos:
+            future = executor.submit(_search_combo, keyword, category, city, pages_per_search)
+            futures[future] = (keyword, city)
+
+        for future in as_completed(futures):
+            try:
+                jobs = future.result()
+                for job in jobs:
+                    jid = job.get("job_id", "")
+                    if jid in seen_ids:
+                        _last_stats["duplicates"] += 1
+                        continue
+                    seen_ids.add(jid)
+                    all_jobs.append(job)
+            except Exception as e:
+                _last_stats["failed_requests"] += 1
+                kw, city = futures[future]
+                log.warning("  Indeed combo failed: %s / %s — %s", kw, city, e)
+
+    _last_stats["total_duration"] = time.time() - start_all
+    _last_stats["jobs_found"] = len(all_jobs)
+
+    log.info("Indeed fetch_all: %s queries, %s pages, %s jobs found, %s duplicates, %s failed, %.1fs total",
+             _last_stats["queries"], _last_stats["pages"],
+             _last_stats["jobs_found"], _last_stats["duplicates"],
+             _last_stats["failed_requests"], _last_stats["total_duration"])
+
+    return all_jobs
+
+
+def get_last_stats():
+    return dict(_last_stats)
 
 
 def save_jobs(jobs: list, path: str = INDEED_OUTPUT):
@@ -340,34 +417,66 @@ def merge_into_all_roles(indeed_jobs: list, all_roles_path: str = ALL_ROLES_FILE
     else:
         existing = []
 
-    existing_ids = {}
+    existing_by_link = {}
+    existing_by_id = {}
+    existing_by_key = {}
     for job in existing:
+        url = job.get("url", "") or ""
+        if url:
+            existing_by_link[url] = job
         jid = job.get("job_id", "")
         if jid:
-            existing_ids[jid] = True
-        key = (job.get("title", ""), job.get("company", ""))
-        existing_ids[key] = True
+            existing_by_id[jid] = job
+        key = (job.get("title", ""), job.get("company", ""), job.get("location", ""))
+        existing_by_key[key] = job
 
     new_count = 0
+    updated_count = 0
+
     for job in indeed_jobs:
+        url = job.get("url", "") or ""
         jid = job.get("job_id", "")
-        if jid and jid in existing_ids:
+        key = (job.get("title", ""), job.get("company", ""), job.get("location", ""))
+
+        if url and url in existing_by_link:
+            existing_job = existing_by_link[url]
+            if (existing_job.get("description") != job.get("description") or
+                    existing_job.get("title") != job.get("title")):
+                idx = existing.index(existing_job)
+                existing[idx] = job
+                existing_by_link[url] = job
+                updated_count += 1
             continue
-        key = (job.get("title", ""), job.get("company", ""))
-        if key in existing_ids:
+
+        if jid and jid in existing_by_id:
+            existing_job = existing_by_id[jid]
+            if (existing_job.get("description") != job.get("description") or
+                    existing_job.get("title") != job.get("title")):
+                idx = existing.index(existing_job)
+                existing[idx] = job
+                existing_by_id[jid] = job
+                updated_count += 1
             continue
-        # Strip internal fields
+
+        if key in existing_by_key:
+            continue
+
         out = {k: v for k, v in job.items() if not k.startswith("_")}
         out.pop("job_key", None)
         existing.append(out)
-        existing_ids[jid] = True
-        existing_ids[key] = True
+        if url:
+            existing_by_link[url] = out
+        if jid:
+            existing_by_id[jid] = out
+        existing_by_key[key] = out
         new_count += 1
+
+    _last_stats["new_jobs"] = new_count
 
     with open(all_roles_path, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2, ensure_ascii=False)
 
-    log.info("Merged %s new Indeed jobs into %s", new_count, all_roles_path)
+    log.info("Merged %s new + %s updated Indeed jobs into %s", new_count, updated_count, all_roles_path)
     return new_count
 
 
@@ -380,11 +489,10 @@ if __name__ == "__main__":
     log = logging.getLogger("agent")
 
     import sys
+    location = sys.argv[1] if len(sys.argv) > 1 else None
 
-    location = sys.argv[1] if len(sys.argv) > 1 else "Hyderabad"
-
-    log.info("Fetching jobs from Indeed.com for location: %s", location)
-    jobs = fetch_all(location=location, pages_per_search=2)
+    log.info("Fetching jobs from Indeed.com for location: %s", location or "ALL CITIES")
+    jobs = fetch_all(location=location)
     save_jobs(jobs)
 
     if jobs:

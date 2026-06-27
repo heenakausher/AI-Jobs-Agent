@@ -9,6 +9,8 @@ AI-powered job application assistant that scrapes jobs from Naukri, Indeed, and 
 ## Features
 
 - **Multi-source job scraping** — Naukri (API), Indeed (HTML), LinkedIn (public job search)
+- **Massive combinatorial search** — 27+ roles × 6 cities × 6 experience levels with automatic synonym expansion
+- **Parallel scraping** — ThreadPoolExecutor for concurrent searches across combinations and sources
 - **AI-powered scoring** — Groq LLM evaluates each job against your CV (0-10)
 - **Profile-specific resume generation** — Different resume strategies for 8+ role types
 - **ATS-optimized output** — No tables, text boxes, icons, graphics, columns, or headers/footers with important info
@@ -17,9 +19,12 @@ AI-powered job application assistant that scrapes jobs from Naukri, Indeed, and 
 - **Quality review pass** — LLM review catches grammar, tone, ATS issues, hallucinations
 - **Cover letters** — Personalized 300-450 word cover letters per role
 - **Google Sheets integration** — Tracks applications with match %, prep topics, acceptance chance
-- **Deduplication** — Never regenerates already-processed jobs
+- **Intelligent deduplication** — Dedup by company + title + location + posting link; updates edited postings
 - **Cached scoring** — `score_cache.json` and `generation_progress.json` persist across runs
 - **Date-stamped outputs** — Organized under `outputs/YYYY-MM-DD/`
+- **Statistics tracking** — Daily stats saved to `agent_stats.json` with historical data
+- **Scraper health monitoring** — Detects broken scrapers (zero jobs for 3+ consecutive runs)
+- **Statistics dashboard** — Plotly-based `stats_dashboard.py` generates HTML reports with charts
 - **GitHub Actions automation** — Daily scheduled runs with artifact uploads
 
 ---
@@ -28,34 +33,64 @@ AI-powered job application assistant that scrapes jobs from Naukri, Indeed, and 
 
 ```mermaid
 flowchart TD
-    A[Job Scrapers] --> B[processed_jobs.json]
-    B --> C[Groq Scoring]
-    C --> D{Score > 6?}
-    D -->|Yes| E[Profile Detection]
-    E --> F[Profile-Specific Resume Generation]
-    F --> G[Quality Review Pass]
-    G --> H[DOCX Generation]
-    G --> I[PDF Generation]
-    F --> J[Cover Letter Generation]
-    J --> K[DOCX Generation]
-    J --> L[PDF Generation]
-    H --> M[Google Sheets Upload]
-    I --> M
-    K --> M
-    L --> M
-    M --> N[GitHub Artifacts]
-    
-    style A fill:#e1f5fe
-    style B fill:#fff3e0
-    style C fill:#e8f5e9
-    style E fill:#f3e5f5
-    style F fill:#e8f5e9
-    style G fill:#fff3e0
-    style H fill:#fce4ec
-    style I fill:#fce4ec
-    style J fill:#f3e5f5
-    style M fill:#e1f5fe
-    style N fill:#e8f5e9
+    subgraph Scraping
+        A1[Naukri Scraper] --> A2[ThreadPoolExecutor<br/>roles × cities × exp]
+        B1[Indeed Scraper] --> B2[ThreadPoolExecutor<br/>roles × cities]
+        C1[LinkedIn Scraper] --> C2[ThreadPoolExecutor<br/>roles × cities × exp]
+    end
+
+    A2 --> D[processed_jobs.json]
+    B2 --> D
+    C2 --> D
+
+    D --> E[Groq Scoring]
+    E --> F{Score > 6?}
+    F -->|Yes| G[Profile Detection]
+    G --> H[Profile-Specific Resume Generation]
+    H --> I[Quality Review Pass]
+    I --> J[DOCX Generation]
+    I --> K[PDF Generation]
+    H --> L[Cover Letter Generation]
+    L --> M[DOCX Generation]
+    L --> N[PDF Generation]
+    J --> O[Google Sheets Upload]
+    K --> O
+    M --> O
+    N --> O
+
+    O --> P[GitHub Artifacts]
+    P --> Q[agent.log / agent_stats.json /<br/>scraper_health.json / stats_report.html]
+
+    subgraph Monitoring
+        R[agent_stats.json]
+        S[scraper_health.json]
+        T[stats_dashboard.py]
+        U[stats_report.html]
+    end
+
+    D --> R
+    E --> R
+    O --> R
+
+    style A1 fill:#e1f5fe
+    style B1 fill:#e1f5fe
+    style C1 fill:#e1f5fe
+    style D fill:#fff3e0
+    style E fill:#e8f5e9
+    style F fill:#ffccbc
+    style G fill:#f3e5f5
+    style H fill:#e8f5e9
+    style I fill:#fff3e0
+    style J fill:#fce4ec
+    style K fill:#fce4ec
+    style L fill:#f3e5f5
+    style O fill:#e1f5fe
+    style P fill:#e8f5e9
+    style Q fill:#f5f5f5
+    style R fill:#ede7f6
+    style S fill:#ede7f6
+    style T fill:#ede7f6
+    style U fill:#ede7f6
 ```
 
 ---
@@ -64,31 +99,35 @@ flowchart TD
 
 ```
 AI-Jobs-Agent/
-├── main.py                      # Orchestrator: scraping, scoring, generation, upload
-├── groq_api.py                  # Groq LLM API client with retry & rate-limit handling
-├── prompts.py                   # Profile-specific resume/cover letter prompts (8+ profiles)
-├── resume_reviewer.py           # Quality review pass for generated resumes
-├── auto_scorer.py               # Automated AI job scoring against CV
-├── auth_sheets.py               # Google Sheets OAuth2 flow
+├── config.py                     # Central configuration — all settings in one place
+├── main.py                       # Orchestrator: scraping, scoring, generation, upload
+├── groq_api.py                   # Groq LLM API client with retry & rate-limit handling
+├── prompts.py                    # Profile-specific resume/cover letter prompts (8+ profiles)
+├── resume_reviewer.py            # Quality review pass for generated resumes
+├── auto_scorer.py                # Automated AI job scoring against CV
+├── auth_sheets.py                # Google Sheets OAuth2 flow
 │
-├── naukri_scraper.py            # Naukri.com job scraper (API v3)
-├── indeed_scraper.py            # Indeed.com job scraper (HTML parsing)
-├── linkedin_scraper.py          # LinkedIn job scraper (guest API)
+├── naukri_scraper.py             # Naukri.com job scraper (API v3 + parallel expansion)
+├── indeed_scraper.py             # Indeed.com job scraper (HTML parsing + parallel expansion)
+├── linkedin_scraper.py           # LinkedIn job scraper (guest API + parallel expansion)
 │
-├── reformat_cv.py               # Utility to reformat existing CVs with new styling
-├── deploy.sh                    # Local deployment & run script
-├── requirements.txt             # Python dependencies
+├── stats_dashboard.py            # Plotly-based statistics dashboard generator
+├── reformat_cv.py                # Utility to reformat existing CVs with new styling
+├── deploy.sh                     # Local deployment & run script
+├── requirements.txt              # Python dependencies
 │
-├── processed_jobs.json          # Central job store (all sources merged)
-├── score_cache.json             # Cached job scores (persisted across runs)
-├── generation_progress.json     # Tracks which jobs already generated CVs/letters
-├── enhanced_cv.txt              # Source CV text (used as factual base)
+├── processed_jobs.json           # Central job store (all sources merged)
+├── score_cache.json              # Cached job scores (persisted across runs)
+├── generation_progress.json      # Tracks which jobs already generated CVs/letters
+├── agent_stats.json              # Daily run statistics (historical, append-only)
+├── scraper_health.json           # Scraper health monitoring data
+├── enhanced_cv.txt               # Source CV text (used as factual base)
 │
 ├── .github/workflows/
-│   └── daily-agent.yml          # GitHub Actions automation
+│   └── daily-agent.yml           # GitHub Actions automation
 │
 └── outputs/
-    └── YYYY-MM-DD/              # Date-stamped generated files
+    └── YYYY-MM-DD/               # Date-stamped generated files
         └── company_title/
             ├── tailored_cv.docx
             ├── tailored_cv.pdf
@@ -101,32 +140,47 @@ AI-Jobs-Agent/
 ## Workflow
 
 ### 1. Job Scraping
-Scrapers collect jobs from Naukri, Indeed, and LinkedIn for target locations (Hyderabad, Pune) across these roles:
-- Data Analyst, Business Analyst, Business Intelligence
-- Financial Analyst, Finance, SAP FICO
-- AI Engineer, Agentic AI, Machine Learning, AI Intern
-- GenAI, LLM, RAG
+Scrapers collect jobs from Naukri, Indeed, and LinkedIn across **every combination** of:
+- **Cities**: Hyderabad, Pune, Bengaluru, Chennai, Remote (India), All India
+- **Experience**: Internship, Fresher, 0-1 years, 1-3 years, Mid level, Experienced
+- **Roles**: 27+ roles with automatic synonym expansion
 
-All jobs merge into `processed_jobs.json`.
+**Search expansion:**
+| Role | Synonyms Also Searched |
+|------|----------------------|
+| Business Intelligence | BI, Analytics, Reporting, Dashboard, MIS |
+| GenAI | Generative AI, AI Automation, Agentic AI |
+| LLM | Large Language Model |
+| FP&A | Financial Planning, Financial Planning & Analysis |
+| SAP Finance | SAP FICO |
+| ... and more | |
 
-### 2. AI Scoring
+Search combinations are scraped concurrently using `ThreadPoolExecutor` (configurable worker count).
+
+### 2. Deduplication
+Improved deduplication using:
+1. **Posting link** (primary identifier)
+2. **company + title + location** (fallback)
+3. If a posting is edited (same link, different content), the entry is **updated** instead of skipped
+
+### 3. AI Scoring
 Each job is scored against the candidate's CV using Groq LLM (`llama-3.3-70b-versatile`):
 - **0-10 scale** based on skills match, experience relevance, education alignment
-- Only jobs scoring **> 6** proceed to generation
+- Only jobs scoring **> 6** (configurable via `config.py`) proceed to generation
 - Results cached in `score_cache.json`
 
-### 3. Profile Detection
+### 4. Profile Detection
 The system detects the best-matching resume profile from the job title, category, and description:
 - Data Analyst, BI Analyst, Financial Analyst, SAP FICO
 - AI Engineer, Agentic AI Engineer, ML Engineer, GenAI/LLM
 
-### 4. Resume Generation
+### 5. Resume Generation
 Each profile uses a different prompt strategy:
 - **Analyst roles** → Lead with work experience + data tools, then AI projects
 - **AI/ML roles** → Lead with AI skills + GitHub projects, then work experience
 - **Finance roles** → Lead with finance experience + education, then analytics skills
 
-### 5. Quality Review
+### 6. Quality Review
 Every generated resume passes through a second LLM review that verifies:
 - Grammar, spelling, punctuation
 - Professional tone
@@ -136,15 +190,94 @@ Every generated resume passes through a second LLM review that verifies:
 - Weak bullet points
 - Action verb usage
 
-### 6. Output Generation
+### 7. Output Generation
 - **DOCX** — python-docx with Calibri font, professional navy headings, consistent spacing
 - **PDF** — fpdf2 with matching DejaVu font, same visual structure
 
-### 7. Google Sheets Upload
-Application data logged with: job title, company, match %, prep topics, acceptance chance, status, date.
+### 8. Google Sheets Upload
+Application data logged with headers: Job Title, Company, Match %, Prep Topics, Acceptance Chance %, Status, Date.
+Column headers are automatically created if they don't exist.
 
-### 8. GitHub Actions Artifacts
-Generated files uploaded as workflow artifacts for download.
+---
+
+## Statistics System
+
+### Daily Statistics (`agent_stats.json`)
+After every run, statistics are saved with a daily entry (historical data preserved):
+
+```json
+{
+  "date": "2026-06-27",
+  "runtime_seconds": 123.4,
+  "naukri": { "queries": 0, "pages": 0, "jobs_found": 0, ... },
+  "indeed": { ... },
+  "linkedin": { ... },
+  "total": { "jobs_found": 0, "duplicates": 0, "cv_generated": 0, ... }
+}
+```
+
+### Console Summary
+At the end of every run, a rich summary is printed:
+```
+==================================================
+SCRAPING SUMMARY
+==================================================
+Naukri:
+  Queries executed:   50
+  Pages scraped:      120
+  Jobs found:         200
+  Duplicates removed: 30
+  New jobs:           170
+  Avg response time:  1.20s
+  Health status:      OK
+...
+==================================================
+PROCESSING SUMMARY
+==================================================
+Jobs scored:         50
+Average score:       7.2/10
+Recommended:         20
+CV generated:        15
+Cover letters:       15
+Sheets uploads:      15
+Sheets failures:     0
+Execution time:      5m 30s
+==================================================
+```
+
+### Statistics Dashboard
+```bash
+python3 stats_dashboard.py
+```
+Prints a 30-day summary and generates `stats_report.html` with interactive Plotly charts:
+- Jobs scraped per day
+- Jobs by source
+- CVs generated per day
+- Jobs scored & recommended
+- Scraper queries over time
+- Scraper response times
+
+---
+
+## Configuration
+
+All configurable values are centralized in `config.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CITIES` | 6 cities | Target cities for job search |
+| `EXPERIENCE_LEVELS` | 6 levels | Experience level filters |
+| `ROLES_DATA` | 27+ roles | Keywords with synonyms and categories |
+| `MAX_PAGES` | 5 | Maximum pages per search combination |
+| `CONCURRENT_WORKERS` | 10 | ThreadPoolExecutor workers |
+| `MIN_AI_SCORE` | 6 | Minimum score to proceed to generation |
+| `SCORING_MODEL` | llama-3.3-70b-versatile | Groq model for scoring |
+| `GENERATION_MODEL` | llama-3.1-8b-instant | Groq model for generation |
+| `RATE_LIMIT_NAUKRI` | 1.0s | Delay between Naukri requests |
+| `RATE_LIMIT_INDEED` | 2.0s | Delay between Indeed requests |
+| `RATE_LIMIT_LINKEDIN` | 2.0s | Delay between LinkedIn requests |
+| `MAX_RETRIES` | 3 | General API retry count |
+| `HEALTH_CONSECUTIVE_ZERO_THRESHOLD` | 3 | Consecutive zero-job runs before flagging scraper as broken |
 
 ---
 
@@ -170,7 +303,7 @@ sudo apt-get install fonts-dejavu-core
 
 ---
 
-## Configuration
+## Configuration Guide
 
 ### 1. Environment Variables
 ```env
@@ -235,10 +368,18 @@ cat cv_base64.txt
 # Full pipeline: fetch + score + generate
 python3 main.py --fetch-naukri --fetch-indeed --fetch-linkedin --auto-score
 
+# Parallel scraping mode
+python3 main.py --fetch-naukri --fetch-indeed --fetch-linkedin --auto-score --parallel
+
 # Or run individual steps:
 python3 main.py --fetch-naukri --only-naukri      # Fetch only
 python3 auto_scorer.py                              # Score only
 python3 main.py                                     # Generate only
+```
+
+### Statistics Dashboard
+```bash
+python3 stats_dashboard.py
 ```
 
 ### Deploy Script
@@ -267,13 +408,20 @@ The workflow runs **daily at 03:00 UTC** and can also be triggered manually.
 11. Quality review pass
 12. Upload to Google Sheets
 13. Save updated cache
-14. Upload generated files as artifacts
-15. Commit cache files back to repository
+14. Show generated files
+15. **Upload artifacts:**
+    - `outputs/**` — generated CVs and cover letters
+    - `agent.log` — runtime logs
+    - `agent_stats.json` — daily statistics
+    - `processed_jobs.json` — all scraped jobs
+    - `score_cache.json` — cached scores
+    - `generation_progress.json` — generation tracking
+    - `scraper_health.json` — scraper health monitoring
+    - `stats_report.html` — statistics charts
+16. Commit cache files back to repository
 
-### Caching Strategy
-- `score_cache.json` — persists scored jobs across workflow runs
-- `generation_progress.json` — prevents regenerating CVs for already-processed jobs
-- Both restored from GitHub Actions cache; committed back after each run
+### Scraper Health Monitoring
+If a scraper returns zero jobs for 3+ consecutive runs, it is flagged as **broken** in `scraper_health.json` and a warning is printed in the console summary.
 
 ---
 
@@ -293,12 +441,12 @@ outputs/
 ```
 
 ### ATS Compliance
-- ✅ No tables, text boxes, icons, or graphics
-- ✅ No columns or headers/footers with important info
-- ✅ Standard section headings (PROFESSIONAL SUMMARY, TECHNICAL SKILLS, etc.)
-- ✅ Professional fonts (Calibri body, navy headings)
-- ✅ Consistent spacing and bullet formatting
-- ✅ Compatible with Workday, Greenhouse, Lever, and Taleo
+- No tables, text boxes, icons, or graphics
+- No columns or headers/footers with important info
+- Standard section headings (PROFESSIONAL SUMMARY, TECHNICAL SKILLS, etc.)
+- Professional fonts (Calibri body, navy headings)
+- Consistent spacing and bullet formatting
+- Compatible with Workday, Greenhouse, Lever, and Taleo
 
 ---
 
@@ -314,6 +462,24 @@ The system uses multiple layers to prevent factual errors:
 
 ---
 
+## Modules Reference
+
+| Module | Purpose | Key Functions |
+|--------|---------|---------------|
+| `config.py` | Central configuration | All settings, `get_expanded_searches()` |
+| `main.py` | Orchestrator | `main()`, `process_job()`, `generate_for_job()` |
+| `groq_api.py` | Groq LLM HTTP client | `query_groq()` — handles auth, retries, rate limits |
+| `prompts.py` | Profile-specific prompt templates | `detect_profile()`, `build_system_prompt()` |
+| `resume_reviewer.py` | Quality review | `review_and_improve()` |
+| `auto_scorer.py` | AI job scoring | `score_all_unscored()` |
+| `auth_sheets.py` | Google Sheets OAuth | `step1()`, `step2()` |
+| `naukri_scraper.py` | Naukri scraper | `fetch_all()`, `get_last_stats()`, `merge_into_all_roles()` |
+| `indeed_scraper.py` | Indeed scraper | `fetch_all()`, `get_last_stats()`, `merge_into_all_roles()` |
+| `linkedin_scraper.py` | LinkedIn scraper | `fetch_all()`, `get_last_stats()`, `merge_into_all_roles()` |
+| `stats_dashboard.py` | Statistics dashboard | `generate_dashboard()` — Plotly HTML report |
+
+---
+
 ## Error Handling
 
 - All scrapers have retry logic for network errors
@@ -321,6 +487,7 @@ The system uses multiple layers to prevent factual errors:
 - Google Sheets API retries on transient failures (429, 500, 502, 503)
 - GitHub Actions uses `continue-on-error: true` — one failure never stops the pipeline
 - Each job processes independently — a single failure doesn't block others
+- Scraper health monitoring detects when a source site changes layout or starts blocking requests
 
 ---
 
@@ -333,22 +500,6 @@ The system uses multiple layers to prevent factual errors:
 - [ ] Resume version comparison and history
 - [ ] Custom branding/themes for different companies
 - [ ] Real-time scraping with WebSocket job notifications
-
----
-
-## Modules Reference
-
-| Module | Purpose | Key Functions |
-|--------|---------|---------------|
-| `main.py` | Orchestrator — ties all modules together | `main()`, `process_job()`, `generate_for_job()` |
-| `groq_api.py` | Groq LLM HTTP client | `query_groq()` — handles auth, retries, rate limits |
-| `prompts.py` | Profile-specific prompt templates | `detect_profile()`, `build_system_prompt()`, `build_cover_letter_prompt()`, `build_review_prompt()`, `extract_delimited()` |
-| `resume_reviewer.py` | Quality review for generated resumes | `review_and_improve()` — grammar, ATS, hallucination check |
-| `auto_scorer.py` | AI job scoring | `score_all_unscored()` — scores jobs against CV |
-| `auth_sheets.py` | Google Sheets OAuth | `step1()`, `step2()` — PKCE auth flow |
-| `naukri_scraper.py` | Naukri job scraper | `fetch_all()`, `save_jobs()`, `merge_into_all_roles()` |
-| `indeed_scraper.py` | Indeed job scraper | `fetch_all()`, `save_jobs()`, `merge_into_all_roles()` |
-| `linkedin_scraper.py` | LinkedIn job scraper | `fetch_all()`, `save_jobs()`, `merge_into_all_roles()` |
 
 ---
 

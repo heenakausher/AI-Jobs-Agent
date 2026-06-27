@@ -1,11 +1,20 @@
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from config import (
+    get_expanded_searches, CITIES, EXPERIENCE_LEVELS,
+    EXPERIENCE_PARAMS, MAX_PAGES, CONCURRENT_WORKERS,
+    RATE_LIMIT_NAUKRI, MAX_RETRIES_SCRAPER, REQUEST_TIMEOUT,
+    JOBS_JSON, LEGACY_SEARCHES
+)
 
 log = logging.getLogger("agent")
 
@@ -20,27 +29,27 @@ HEADERS = {
     "Referer": "https://www.naukri.com/",
 }
 
-NAUKRI_SEARCHES = [
-    {"keyword": "Data Analyst", "category": "data_analyst"},
-    {"keyword": "Business Analyst", "category": "data_analyst"},
-    {"keyword": "Business Intelligence", "category": "data_analyst"},
-    {"keyword": "Data Analytics", "category": "data_analyst"},
-    {"keyword": "Power BI", "category": "data_analyst"},
-    {"keyword": "Financial Analyst", "category": "finance_roles"},
-    {"keyword": "Finance", "category": "finance_roles"},
-    {"keyword": "SAP FICO", "category": "finance_roles"},
-    {"keyword": "Agentic AI", "category": "agentic_ai"},
-    {"keyword": "AI Engineer", "category": "agentic_ai"},
-    {"keyword": "Machine Learning", "category": "agentic_ai"},
-    {"keyword": "GenAI", "category": "agentic_ai"},
-    {"keyword": "LLM", "category": "agentic_ai"},
-    {"keyword": "RAG", "category": "agentic_ai"},
-    {"keyword": "AI Intern", "category": "fresher_ai_ml"},
-    {"keyword": "Finance Intern", "category": "fresher_ai_ml"},
-]
-
-ALL_ROLES_FILE = "processed_jobs.json"
+ALL_ROLES_FILE = JOBS_JSON
 NAUKRI_OUTPUT = "naukri_jobs.json"
+
+_last_stats = {
+    "queries": 0, "pages": 0, "jobs_found": 0,
+    "duplicates": 0, "new_jobs": 0, "failed_requests": 0,
+    "total_duration": 0.0,
+    "durations": [],
+}
+
+_rate_limiter = threading.Lock()
+_last_request_time = 0.0
+
+
+def _rate_limit():
+    global _last_request_time
+    with _rate_limiter:
+        elapsed = time.time() - _last_request_time
+        if elapsed < RATE_LIMIT_NAUKRI:
+            time.sleep(RATE_LIMIT_NAUKRI - elapsed)
+        _last_request_time = time.time()
 
 
 def _extract_location(placeholders: list) -> str:
@@ -53,7 +62,7 @@ def _extract_location(placeholders: list) -> str:
     return placeholders[0].get("label", "Hyderabad, India")
 
 
-def search_naukri(keyword: str, location: str = "Hyderabad", pages: int = 2) -> list:
+def search_naukri(keyword: str, location: str = "Hyderabad", pages: int = 2, experience: str = None) -> list:
     all_jobs = []
     for page in range(1, pages + 1):
         params = {
@@ -61,33 +70,49 @@ def search_naukri(keyword: str, location: str = "Hyderabad", pages: int = 2) -> 
             "keyword": keyword,
             "location": location,
             "pageNo": page,
-            "experienceType": "all",
+            "experienceType": EXPERIENCE_PARAMS.get("naukri", {}).get(experience, "all") if experience else "all",
             "jobAge": "30",
         }
         url = f"{NAUKRI_API}?{urllib.parse.urlencode(params)}"
+
+        log.debug("  Naukri: city=%s role=%s exp=%s page=%s", location, keyword, experience or "all", page)
+        log.debug("  URL: %s", url)
+
+        _rate_limit()
+        start_ts = time.time()
         req = urllib.request.Request(url, headers=HEADERS)
         try:
-            resp = urllib.request.urlopen(req, timeout=30)
+            resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
             data = json.loads(resp.read().decode())
             jobs = data.get("jobDetails", [])
+            duration = time.time() - start_ts
+            log.debug("  Page %s: %s jobs (%.1fs)", page, len(jobs), duration)
             if not jobs:
                 break
             all_jobs.extend(jobs)
-            log.info("  Page %s: %s jobs", page, len(jobs))
-            time.sleep(1)
+            _last_stats["pages"] += 1
+            _last_stats["durations"].append(duration)
+        except urllib.error.HTTPError as e:
+            _last_stats["failed_requests"] += 1
+            log.warning("  Naukri HTTP %s for %s / %s page %s: %s", e.code, keyword, location, page, e)
+            break
         except Exception as e:
-            log.warning("  API error on page %s: %s", page, e)
+            _last_stats["failed_requests"] += 1
+            log.warning("  Naukri error for %s / %s page %s: %s", keyword, location, page, e)
             break
     return all_jobs
 
 
-def transform_naukri_job(raw: dict, category: str = "data_analyst") -> dict:
+def transform_naukri_job(raw: dict, category: str = "data_analyst", keyword: str = "") -> dict:
     title = (raw.get("title") or "").strip()
     company = (raw.get("companyName") or "").strip()
     location = _extract_location(raw.get("placeholders") or [])
     job_id = raw.get("jdid") or raw.get("jobId", "")
     description = (raw.get("jobDescription") or raw.get("description", "")).strip()
     date_str = datetime.date.today().isoformat()
+
+    jd = raw.get("jdid") or ""
+    url = f"https://www.naukri.com/job-details/{jd}" if jd else ""
 
     return {
         "category": category,
@@ -97,31 +122,92 @@ def transform_naukri_job(raw: dict, category: str = "data_analyst") -> dict:
         "date": date_str,
         "job_id": job_id,
         "description": description,
+        "url": url,
+        "source": "Naukri",
     }
 
 
-def fetch_all(location: str = "Hyderabad", pages_per_search: int = 2) -> list:
+def _search_combo(keyword: str, category: str, city: str, experience: str, pages_per_search: int) -> list:
+    log.info("  Naukri: city=%s role=%s exp=%s", city, keyword, experience)
+    start_ts = time.time()
+    raw_jobs = search_naukri(keyword, city, pages=pages_per_search, experience=experience)
+    duration = time.time() - start_ts
+    log.info("  Naukri: city=%s role=%s exp=%s → %s jobs (%.1fs)", city, keyword, experience, len(raw_jobs), duration)
+
+    _last_stats["queries"] += 1
+    _last_stats["jobs_found"] += len(raw_jobs)
+
+    transformed = []
+    seen_in_batch = set()
+    for raw in raw_jobs:
+        jd = raw.get("jdid") or raw.get("jobId", "")
+        if jd in seen_in_batch:
+            continue
+        seen_in_batch.add(jd)
+        transformed.append(transform_naukri_job(raw, category=category, keyword=keyword))
+
+    return transformed
+
+
+def fetch_all(location=None, pages_per_search=None, experience=None):
+    global _last_stats
+    _last_stats = {
+        "queries": 0, "pages": 0, "jobs_found": 0,
+        "duplicates": 0, "new_jobs": 0, "failed_requests": 0,
+        "total_duration": 0.0, "durations": [],
+    }
+
+    if pages_per_search is None:
+        pages_per_search = MAX_PAGES
+
+    searches = get_expanded_searches()
+    cities = [location] if location else CITIES
+    experiences = [experience] if experience else EXPERIENCE_LEVELS
+
+    all_jobs = []
     seen_ids = set()
-    all_transformed = []
 
-    for search in NAUKRI_SEARCHES:
-        kw = search["keyword"]
-        cat = search["category"]
-        log.info("Searching Naukri for '%s' (%s)...", kw, cat)
-        raw_jobs = search_naukri(kw, location, pages=pages_per_search)
+    combos = [(s["keyword"], s["category"], c, e)
+              for s in searches
+              for c in cities
+              for e in experiences]
 
-        for raw in raw_jobs:
-            jd = raw.get("jdid") or raw.get("jobId", "")
-            if jd in seen_ids:
-                continue
-            seen_ids.add(jd)
+    start_all = time.time()
 
-            transformed = transform_naukri_job(raw, category=cat)
-            all_transformed.append(transformed)
+    with ThreadPoolExecutor(max_workers=CONCURRENT_WORKERS) as executor:
+        futures = {}
+        for keyword, category, city, exp in combos:
+            future = executor.submit(_search_combo, keyword, category, city, exp, pages_per_search)
+            futures[future] = (keyword, city, exp)
 
-        log.info("  %s total unique so far: %s", kw, len(all_transformed))
+        for future in as_completed(futures):
+            try:
+                jobs = future.result()
+                for job in jobs:
+                    jid = job.get("job_id", "")
+                    if jid in seen_ids:
+                        _last_stats["duplicates"] += 1
+                        continue
+                    seen_ids.add(jid)
+                    all_jobs.append(job)
+            except Exception as e:
+                _last_stats["failed_requests"] += 1
+                kw, city, exp = futures[future]
+                log.warning("  Naukri combo failed: %s / %s / %s — %s", kw, city, exp, e)
 
-    return all_transformed
+    _last_stats["total_duration"] = time.time() - start_all
+    _last_stats["jobs_found"] = len(all_jobs)
+
+    log.info("Naukri fetch_all: %s queries, %s pages, %s jobs found, %s duplicates, %s failed, %.1fs total",
+             _last_stats["queries"], _last_stats["pages"],
+             _last_stats["jobs_found"], _last_stats["duplicates"],
+             _last_stats["failed_requests"], _last_stats["total_duration"])
+
+    return all_jobs
+
+
+def get_last_stats():
+    return dict(_last_stats)
 
 
 def save_jobs(jobs: list, path: str = NAUKRI_OUTPUT):
@@ -137,31 +223,64 @@ def merge_into_all_roles(naukri_jobs: list, all_roles_path: str = ALL_ROLES_FILE
     else:
         existing = []
 
-    existing_ids = {}
+    existing_by_link = {}
+    existing_by_id = {}
+    existing_by_key = {}
     for job in existing:
+        url = job.get("url", "") or ""
+        if url:
+            existing_by_link[url] = job
         jid = job.get("job_id", "")
         if jid:
-            existing_ids[jid] = True
-        key = (job.get("title", ""), job.get("company", ""))
-        existing_ids[key] = True
+            existing_by_id[jid] = job
+        key = (job.get("title", ""), job.get("company", ""), job.get("location", ""))
+        existing_by_key[key] = job
 
     new_count = 0
+    updated_count = 0
+
     for job in naukri_jobs:
+        url = job.get("url", "") or ""
         jid = job.get("job_id", "")
-        if jid and jid in existing_ids:
+        key = (job.get("title", ""), job.get("company", ""), job.get("location", ""))
+
+        if url and url in existing_by_link:
+            existing_job = existing_by_link[url]
+            if (existing_job.get("description") != job.get("description") or
+                    existing_job.get("title") != job.get("title")):
+                idx = existing.index(existing_job)
+                existing[idx] = job
+                existing_by_link[url] = job
+                updated_count += 1
             continue
-        key = (job.get("title", ""), job.get("company", ""))
-        if key in existing_ids:
+
+        if jid and jid in existing_by_id:
+            existing_job = existing_by_id[jid]
+            if (existing_job.get("description") != job.get("description") or
+                    existing_job.get("title") != job.get("title")):
+                idx = existing.index(existing_job)
+                existing[idx] = job
+                existing_by_id[jid] = job
+                updated_count += 1
             continue
+
+        if key in existing_by_key:
+            continue
+
         existing.append(job)
-        existing_ids[jid] = True
-        existing_ids[key] = True
+        if url:
+            existing_by_link[url] = job
+        if jid:
+            existing_by_id[jid] = job
+        existing_by_key[key] = job
         new_count += 1
+
+    _last_stats["new_jobs"] = new_count
 
     with open(all_roles_path, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2, ensure_ascii=False)
 
-    log.info("Merged %s new Naukri jobs into %s", new_count, all_roles_path)
+    log.info("Merged %s new + %s updated Naukri jobs into %s", new_count, updated_count, all_roles_path)
     return new_count
 
 
@@ -174,11 +293,10 @@ if __name__ == "__main__":
     log = logging.getLogger("agent")
 
     import sys
+    location = sys.argv[1] if len(sys.argv) > 1 else None
 
-    location = sys.argv[1] if len(sys.argv) > 1 else "Hyderabad"
-
-    log.info("Fetching jobs from Naukri.com for location: %s", location)
-    jobs = fetch_all(location=location, pages_per_search=2)
+    log.info("Fetching jobs from Naukri.com for location: %s", location or "ALL CITIES")
+    jobs = fetch_all(location=location)
     save_jobs(jobs)
 
     if jobs:

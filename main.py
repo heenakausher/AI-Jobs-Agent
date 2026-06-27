@@ -7,6 +7,7 @@ import time
 import urllib.request
 import urllib.error
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from groq_api import query_groq
 import naukri_scraper
 import indeed_scraper
@@ -18,6 +19,13 @@ from prompts import (
     PROFILES
 )
 from resume_reviewer import review_and_improve
+from config import (
+    CITIES, MIN_AI_SCORE, OUTPUT_DIR, JOBS_JSON, CV_FILE,
+    SCORE_CACHE, PROGRESS_FILE, STATS_FILE, HEALTH_FILE,
+    CLIENT_SECRET_FILE, TOKEN_FILE, SHEET_ID, SCOPES,
+    GENERATION_MODEL, OUTPUT_DATE_DIR, CONCURRENT_WORKERS,
+    HEALTH_CONSECUTIVE_ZERO_THRESHOLD, MAX_PAGES
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +52,11 @@ def timer_elapsed() -> str:
         return f"{elapsed:.1f}s"
     return f"{elapsed // 60:.0f}m {elapsed % 60:.0f}s"
 
+def timer_elapsed_seconds() -> float:
+    if _start_time is None:
+        return 0.0
+    return time.time() - _start_time
+
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -54,19 +67,6 @@ from fpdf import FPDF
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as AuthRequest
 
-JOBS_JSON = "processed_jobs.json"
-CV_FILE = "enhanced_cv.txt"
-SCORE_CACHE = "score_cache.json"
-PROGRESS_FILE = "generation_progress.json"
-OUTPUT_DIR = "outputs"
-CLIENT_SECRET_FILE = "client_secret.json"
-TOKEN_FILE = "token.json"
-SHEET_ID = "1debuNPIgf0hYPIaUyLy42IARIXaNE46Gxp9hB50Y8H0"
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-MODEL = "llama-3.1-8b-instant"
-
-OUTPUT_DATE_DIR = os.path.join(OUTPUT_DIR, datetime.date.today().strftime("%Y-%m-%d"))
-
 
 def sanitize_folder_name(s: str) -> str:
     s = re.sub(r'[^\w\s-]', '', s).strip().lower()
@@ -74,24 +74,28 @@ def sanitize_folder_name(s: str) -> str:
     return s[:60]
 
 
-def load_cv(path: str) -> str:
+def load_cv(path: str = CV_FILE) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 
-def load_scores(path: str) -> list:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_scores(path: str = SCORE_CACHE) -> list:
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
 
-def load_progress(path: str) -> dict:
+def load_progress(path: str = PROGRESS_FILE) -> dict:
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
-def save_progress(path: str, data: dict):
+def save_progress(path: str = PROGRESS_FILE, data: dict = None):
+    if data is None:
+        data = load_progress(path)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
@@ -125,6 +129,37 @@ def get_sheets_token() -> str:
     return creds.token
 
 
+def _ensure_sheet_headers(token: str, max_retries: int = 3):
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/A1:G1"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=30)
+        existing = json.loads(resp.read().decode())
+        if existing.get("values"):
+            return
+    except urllib.error.HTTPError:
+        pass
+
+    headers = ["Job Title", "Company", "Match %", "Prep Topics", "Acceptance Chance %", "Status", "Date"]
+    header_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/A1:G1?valueInputOption=USER_ENTERED"
+    body = json.dumps({"values": [headers]}).encode()
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                header_url, data=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                }
+            )
+            urllib.request.urlopen(req, timeout=30)
+            log.info("  Sheet headers added.")
+            return
+        except Exception as e:
+            log.warning("  Sheet header error (attempt %s/%s): %s", attempt, max_retries, e)
+            time.sleep(attempt * 2)
+
+
 def append_sheet_row(token: str, row: list, max_retries: int = 3):
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/A:G:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
     body = json.dumps({"values": [row]}).encode()
@@ -139,7 +174,7 @@ def append_sheet_row(token: str, row: list, max_retries: int = 3):
             )
             urllib.request.urlopen(req, timeout=30)
             log.info("  Sheet row appended.")
-            return
+            return True
         except urllib.error.HTTPError as e:
             body_text = e.read().decode()[:200]
             if e.code in (429, 500, 502, 503) and attempt < max_retries:
@@ -148,7 +183,7 @@ def append_sheet_row(token: str, row: list, max_retries: int = 3):
                 time.sleep(wait)
                 continue
             log.error("  Sheet append error: %s %s", e.code, body_text)
-            return
+            return False
         except urllib.error.URLError as e:
             if attempt < max_retries:
                 wait = attempt * 5
@@ -156,7 +191,7 @@ def append_sheet_row(token: str, row: list, max_retries: int = 3):
                 time.sleep(wait)
                 continue
             log.error("  Sheet network error: %s", e)
-            return
+            return False
 
 
 def generate_for_job(job: dict, cv_text: str) -> tuple:
@@ -182,7 +217,7 @@ CANDIDATE'S ORIGINAL PROFILE (use ONLY this information):
 
 Produce the 4 items (tailored CV, cover letter, interview prep topics, acceptance chance) for this role."""
 
-    response = query_groq(system_prompt, user_prompt, model=MODEL)
+    response = query_groq(system_prompt, user_prompt, model=GENERATION_MODEL)
 
     cv = extract_delimited(response, "TAILORED_CV")
     cl = extract_delimited(response, "COVER_LETTER")
@@ -194,7 +229,7 @@ Produce the 4 items (tailored CV, cover letter, interview prep topics, acceptanc
     if not cl:
         log.info("  Cover letter not found in response, generating separately...")
         cl_prompt = build_cover_letter_prompt(profile, job, cv_text)
-        cl = query_groq(cl_prompt, f"Write a cover letter for {job['title']} at {job['company']}.", model=MODEL)
+        cl = query_groq(cl_prompt, f"Write a cover letter for {job['title']} at {job['company']}.", model=GENERATION_MODEL)
 
     try:
         chance_num = extract_score(chance)
@@ -908,16 +943,144 @@ def process_job(job: dict, cv_text: str, output_base: str) -> tuple:
     return True, prep_text, chance_num, folder_name
 
 
+def _detect_broken_scraper(name: str, jobs_found: int, health_data: dict):
+    """Check if a scraper is returning zero jobs and flag it."""
+    if name not in health_data:
+        health_data[name] = {
+            "last_run": datetime.datetime.now().isoformat(),
+            "jobs_found": jobs_found,
+            "http_success_rate": 1.0,
+            "avg_response_time": 0.0,
+            "consecutive_zero_jobs": 0,
+            "healthy": True,
+        }
+
+    h = health_data[name]
+    h["last_run"] = datetime.datetime.now().isoformat()
+
+    if jobs_found == 0:
+        h["consecutive_zero_jobs"] = h.get("consecutive_zero_jobs", 0) + 1
+        log.warning("  WARNING: %s scraper returned zero jobs (%s consecutive)",
+                     name, h["consecutive_zero_jobs"])
+        if h["consecutive_zero_jobs"] >= HEALTH_CONSECUTIVE_ZERO_THRESHOLD:
+            h["healthy"] = False
+            log.warning("  WARNING: %s scraper may be BROKEN (zero jobs for %s+ consecutive runs)",
+                         name, HEALTH_CONSECUTIVE_ZERO_THRESHOLD)
+    else:
+        h["consecutive_zero_jobs"] = 0
+        h["healthy"] = True
+
+    h["jobs_found"] = jobs_found
+    health_data[name] = h
+    return health_data
+
+
+def _save_agent_stats(stats: dict):
+    existing = []
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r") as f:
+                existing = json.load(f)
+                if not isinstance(existing, list):
+                    existing = [existing]
+        except (json.JSONDecodeError, TypeError):
+            existing = []
+
+    existing.append(stats)
+    with open(STATS_FILE, "w") as f:
+        json.dump(existing, f, indent=2)
+
+
+def _load_health():
+    if os.path.exists(HEALTH_FILE):
+        try:
+            with open(HEALTH_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {}
+
+
+def _save_health(health: dict):
+    with open(HEALTH_FILE, "w") as f:
+        json.dump(health, f, indent=2)
+
+
+def _print_separator(title: str):
+    log.info("")
+    log.info("%s", "=" * 50)
+    log.info("%s", title)
+    log.info("%s", "=" * 50)
+
+
+def _print_scraper_summary(name: str, stats: dict, health: dict):
+    avg_resp = 0.0
+    durations = stats.get("durations", [])
+    if durations:
+        avg_resp = sum(durations) / len(durations)
+
+    h = health.get(name.lower(), {})
+    status = "OK" if h.get("healthy", True) else "BROKEN"
+
+    log.info("%s:", name)
+    log.info("  Queries executed:   %s", stats.get("queries", 0))
+    log.info("  Pages scraped:      %s", stats.get("pages", 0))
+    log.info("  Jobs found:         %s", stats.get("jobs_found", 0))
+    log.info("  Duplicates removed: %s", stats.get("duplicates", 0))
+    log.info("  New jobs:           %s", stats.get("new_jobs", 0))
+    log.info("  Failed requests:    %s", stats.get("failed_requests", 0))
+    log.info("  Avg response time:  %.2fs", avg_resp)
+    log.info("  Health status:      %s", status)
+
+    if stats.get("jobs_found", 0) == 0:
+        log.info("  ⚠ WARNING: %s scraper returned zero jobs", name)
+
+
+def run_scraper_internal(scraper_module, name: str, pages: int = None, location: str = None) -> tuple:
+    total_jobs = []
+    total_new = 0
+    scraper_stats = {}
+
+    try:
+        if hasattr(scraper_module, 'fetch_all') and callable(scraper_module.fetch_all):
+            if location:
+                jobs = scraper_module.fetch_all(location=location, pages_per_search=pages)
+            else:
+                jobs = scraper_module.fetch_all(pages_per_search=pages)
+        else:
+            jobs = scraper_module.fetch_all(location=location or CITIES[0], pages_per_search=pages or MAX_PAGES)
+
+        if jobs:
+            save_path = JOBS_JSON
+            added = scraper_module.merge_into_all_roles(jobs)
+            total_jobs = jobs
+            total_new = added
+        else:
+            total_jobs = []
+            total_new = 0
+
+        if hasattr(scraper_module, 'get_last_stats'):
+            scraper_stats = scraper_module.get_last_stats()
+    except Exception as e:
+        log.error("  %s scraper failed: %s", name, e)
+        return [], 0, scraper_stats
+
+    return total_jobs, total_new, scraper_stats
+
+
 def run_scraper_for_locations(scraper_module, name: str, pages: int = 2, locations: list = None):
+    """Backward-compatible scraper runner."""
     total_jobs = []
     total_new = 0
     if locations is None:
         locations = ["Hyderabad", "Pune"]
     for loc in locations:
         log.info("Fetching %s jobs from '%s'...", name, loc)
-        added = 0
         try:
-            jobs = scraper_module.fetch_all(location=loc, pages_per_search=pages)
+            if hasattr(scraper_module, 'fetch_all'):
+                jobs = scraper_module.fetch_all(location=loc, pages_per_search=pages)
+            else:
+                jobs = scraper_module.fetch_all(location=loc)
             if jobs:
                 scraper_module.save_jobs(jobs)
                 added = scraper_module.merge_into_all_roles(jobs)
@@ -944,47 +1107,99 @@ def main():
 
     migrate_outputs_to_dated_dirs()
 
-    locations = ["Hyderabad", "Pune"]
+    locations = CITIES[:]
     for i, arg in enumerate(sys.argv):
         if arg == "--location" and i + 1 < len(sys.argv):
             locations = [sys.argv[i + 1]]
 
+    pages_arg = MAX_PAGES
+    for i, arg in enumerate(sys.argv):
+        if arg == "--pages" and i + 1 < len(sys.argv):
+            try:
+                pages_arg = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
     any_fetch = False
     only_mode = False
+    parallel = "--parallel" in sys.argv
 
+    source_stats = {}
+    health_data = _load_health()
+
+    scraper_configs = []
     if "--fetch-naukri" in sys.argv:
+        scraper_configs.append((naukri_scraper, "Naukri", pages_arg, locations))
         any_fetch = True
-        jobs, added = run_scraper_for_locations(naukri_scraper, "Naukri", locations=locations)
-        log_scraper_results("Naukri", jobs, added)
         if "--only-naukri" in sys.argv:
             only_mode = True
-
     if "--fetch-indeed" in sys.argv:
+        scraper_configs.append((indeed_scraper, "Indeed", pages_arg, locations))
         any_fetch = True
-        jobs, added = run_scraper_for_locations(indeed_scraper, "Indeed", locations=locations)
-        log_scraper_results("Indeed", jobs, added)
         if "--only-indeed" in sys.argv:
             only_mode = True
-
     if "--fetch-linkedin" in sys.argv:
+        scraper_configs.append((linkedin_scraper, "LinkedIn", pages_arg, locations))
         any_fetch = True
-        jobs, added = run_scraper_for_locations(linkedin_scraper, "LinkedIn", locations=locations)
-        log_scraper_results("LinkedIn", jobs, added)
         if "--only-linkedin" in sys.argv:
             only_mode = True
 
-    if any_fetch and only_mode:
-        log.info("Only-mode set. Exiting after fetch.")
-        log.info("Execution time: %s", timer_elapsed())
-        return
+    if any_fetch:
+        _print_separator("SCRAPING PHASE")
+
+        if parallel and len(scraper_configs) > 1:
+            log.info("Running scrapers in parallel (--parallel mode)...")
+            with ThreadPoolExecutor(max_workers=len(scraper_configs)) as executor:
+                futures = {}
+                for mod, name, pages, locs in scraper_configs:
+                    future = executor.submit(run_scraper_internal, mod, name, pages, locs[0] if len(locs) == 1 else None)
+                    futures[future] = name
+
+                for future in as_completed(futures):
+                    name = futures[future]
+                    try:
+                        jobs, added, stats = future.result()
+                        log_scraper_results(name, jobs, added)
+                        source_stats[name.lower()] = stats
+                        health_data = _detect_broken_scraper(name, len(jobs), health_data)
+                    except Exception as e:
+                        log.error("  %s scraper failed: %s", name, e)
+                        source_stats[name.lower()] = {}
+                        health_data = _detect_broken_scraper(name, 0, health_data)
+        else:
+            for mod, name, pages, locs in scraper_configs:
+                if len(locs) > 0:
+                    log.info("Fetching %s jobs (single location mode: %s)...", name, locs[0])
+                    jobs, added, stats = run_scraper_internal(mod, name, pages, locs[0] if len(locs) == 1 else None)
+                else:
+                    jobs, added, stats = run_scraper_internal(mod, name, pages)
+                log_scraper_results(name, jobs, added)
+                source_stats[name.lower()] = stats
+                health_data = _detect_broken_scraper(name, len(jobs), health_data)
+
+        _save_health(health_data)
+
+        if any_fetch and only_mode:
+            _print_separator("SCRAPING SUMMARY")
+            for name_key in ["naukri", "indeed", "linkedin"]:
+                if name_key in source_stats:
+                    _print_scraper_summary(name_key.capitalize(), source_stats.get(name_key, {}), health_data)
+
+            elapsed = timer_elapsed()
+            log.info("%s", "=" * 50)
+            log.info("Execution time: %s", elapsed)
+            return
 
     if any_fetch and not only_mode:
         log.info("Continuing with full pipeline...\n")
 
+    jobs_scored_this_run = 0
     if "--auto-score" in sys.argv:
+        _print_separator("SCORING PHASE")
         log.info("Running auto-scorer on unscored jobs...")
         try:
             added_scores = auto_scorer.score_all_unscored()
+            jobs_scored_this_run = added_scores
             log.info("Auto-scored %s new jobs.", added_scores)
         except Exception as e:
             log.error("Auto-scorer failed: %s", e)
@@ -995,27 +1210,28 @@ def main():
     scored = load_scores(SCORE_CACHE)
     log.info("Loaded %s cached scores", len(scored))
 
-    good = [r for r in scored if isinstance(r['score'], int) and r['score'] > 6]
+    good = [r for r in scored if isinstance(r['score'], int) and r['score'] > MIN_AI_SCORE]
     good.sort(key=lambda x: x['score'], reverse=True)
 
-    log.info("=" * 80)
-    log.info("RECOMMENDED JOBS (score > 6): %s total", len(good))
+    _print_separator("RECOMMENDED JOBS")
+    log.info("Jobs with score > %s: %s total", MIN_AI_SCORE, len(good))
     log.info("%-3s %-5s %-16s %-40s %-22s", "#", "Score", "Category", "Job Title", "Company")
     log.info("%s", "-" * 86)
     for i, r in enumerate(good, 1):
         cat = r.get('category', 'N/A')[:14]
         log.info("%-3s %-3s/10 %-16s %-37s %-20s", i, r['score'], cat, r['title'][:37], r['company'][:20])
     log.info("%s", "-" * 86)
-    log.info("=" * 80)
 
     log.info("Getting Google Sheets token...")
     sheets_token = None
     try:
         sheets_token = get_sheets_token()
         log.info("  Sheets token ready.")
+        _ensure_sheet_headers(sheets_token)
     except Exception as e:
         log.warning("  Sheets auth failed (will skip uploads): %s", e)
 
+    _print_separator("GENERATION PHASE")
     log.info("Generating tailored CVs & cover letters for %s jobs...", len(good))
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -1033,6 +1249,8 @@ def main():
     completed = 0
     failed = 0
     skipped = 0
+    sheet_uploads = 0
+    sheet_failures = 0
 
     for i, r in enumerate(good, 1):
         key = (r["title"], r["company"])
@@ -1072,9 +1290,13 @@ def main():
             log.info("  Appending to Google Sheet...")
             if sheets_token:
                 try:
-                    append_sheet_row(sheets_token, row)
+                    if append_sheet_row(sheets_token, row):
+                        sheet_uploads += 1
+                    else:
+                        sheet_failures += 1
                 except Exception as e:
                     log.error("  Failed to append sheet row: %s", e)
+                    sheet_failures += 1
             else:
                 log.warning("  Skipping sheet append (no token).")
             progress[job_key] = {"status": "done"}
@@ -1085,19 +1307,62 @@ def main():
         save_progress(PROGRESS_FILE, progress)
         print()
 
-    elapsed = timer_elapsed()
-    log.info("=" * 80)
-    log.info("FINAL SUMMARY")
-    log.info("  Jobs scored:      %s", len(scored))
-    log.info("  Jobs to process:  %s", len(good))
-    log.info("  CVs generated:    %s", completed)
-    log.info("  Cover letters:    %s", completed)
-    log.info("  Skipped (done):   %s", skipped)
-    log.info("  Failed:           %s", failed)
-    log.info("  Sheets uploads:   %s", completed if sheets_token else 0)
-    log.info("  Execution time:   %s", elapsed)
-    log.info("  Output dir:       %s/", OUTPUT_DATE_DIR)
-    log.info("=" * 80)
+    elapsed_str = timer_elapsed()
+    elapsed_sec = timer_elapsed_seconds()
+
+    _print_separator("SCRAPING SUMMARY")
+    for name_key in ["naukri", "indeed", "linkedin"]:
+        if name_key in source_stats:
+            _print_scraper_summary(name_key.capitalize(), source_stats.get(name_key, {}), health_data)
+        else:
+            log.info("%s: (not fetched)", name_key.capitalize())
+
+    _print_separator("PROCESSING SUMMARY")
+    log.info("Jobs scored:         %s", len(scored))
+    log.info("Average score:       %.1f/10", sum(r['score'] for r in scored) / len(scored) if scored else 0)
+    log.info("Recommended:         %s", len(good))
+    log.info("CV generated:        %s", completed)
+    log.info("Cover letters:       %s", completed)
+    log.info("Skipped (done):      %s", skipped)
+    log.info("Failed:              %s", failed)
+    log.info("Sheets uploads:      %s", sheet_uploads)
+    log.info("Sheets failures:     %s", sheet_failures)
+    log.info("Execution time:      %s", elapsed_str)
+    log.info("Output dir:          %s/", OUTPUT_DATE_DIR)
+    log.info("%s", "=" * 50)
+
+    # ── Save agent_stats.json ──────────────────────────────────────
+    total_jobs_found = sum(
+        source_stats.get(s, {}).get("jobs_found", 0)
+        for s in ["naukri", "indeed", "linkedin"]
+    )
+    total_duplicates = sum(
+        source_stats.get(s, {}).get("duplicates", 0)
+        for s in ["naukri", "indeed", "linkedin"]
+    )
+
+    stats_entry = {
+        "date": datetime.date.today().isoformat(),
+        "runtime_seconds": round(elapsed_sec, 1),
+        "naukri": source_stats.get("naukri", {}),
+        "indeed": source_stats.get("indeed", {}),
+        "linkedin": source_stats.get("linkedin", {}),
+        "total": {
+            "jobs_found": total_jobs_found,
+            "duplicates": total_duplicates,
+            "new_jobs": sum(
+                source_stats.get(s, {}).get("new_jobs", 0)
+                for s in ["naukri", "indeed", "linkedin"]
+            ),
+            "jobs_scored": jobs_scored_this_run,
+            "recommended": len(good),
+            "cv_generated": completed,
+            "cover_letters": completed,
+            "uploaded_to_sheet": sheet_uploads,
+            "failed_uploads": sheet_failures,
+        },
+    }
+    _save_agent_stats(stats_entry)
 
 
 if __name__ == "__main__":
