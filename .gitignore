@@ -32,5 +32,3 @@ score_cache.json
 client_secret_base64.txt
 cv_base64.txt
 token_base64.txt
-prompts.py
-resume_reviewer.py
