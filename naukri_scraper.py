@@ -1,36 +1,16 @@
-"""Naukri.com scraper with pagination, per-keyword search, and rate limiting."""
+"""Naukri.com scraper — Playwright-only HTML scraping."""
 
 import datetime
 import json
 import logging
 import os
 import re
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from config import REQUEST_TIMEOUT
 from utils.base_scraper import BaseScraper
 from utils.playwright_helpers import fetch_page_html
 
 log = logging.getLogger("agent")
-
-NAUKRI_API = "https://www.naukri.com/jobapi/v3/search"
-
-BASE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "appid": "109",
-    "systemid": "109",
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.naukri.com/",
-    "Origin": "https://www.naukri.com",
-    "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not=A?Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-}
 
 
 class NaukriScraper(BaseScraper):
@@ -49,32 +29,13 @@ class NaukriScraper(BaseScraper):
     ) -> List[Dict[str, Any]]:
         self.rate_limiter.wait()
 
-        params = {
-            "searchType": "adv",
-            "keyword": keyword,
-            "location": location,
-            "pageNo": page + 1,
-            "experienceType": "all",
-            "jobAge": str(max(1, job_age_hours // 24)),
-        }
-        url = f"{NAUKRI_API}?{urllib.parse.urlencode(params)}"
+        form_keyword = keyword.lower().replace(" ", "-")
+        form_location = location.lower().replace(" ", "-")
+        search_url = f"https://www.naukri.com/{form_keyword}-jobs-in-{form_location}"
 
-        try:
-            req = urllib.request.Request(url, headers=BASE_HEADERS)
-            resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
-            data = json.loads(resp.read().decode())
-            raw_jobs = data.get("jobDetails", [])
-            if raw_jobs:
-                return raw_jobs
-        except urllib.error.HTTPError as e:
-            if e.code in (403, 429):
-                time.sleep(5)
-            log.warning("  Naukri API HTTP %s for %s/%s", e.code, keyword, location)
-        except Exception as e:
-            log.debug("  Naukri API error %s/%s: %s", keyword, location, e)
+        if page > 0:
+            search_url += f"?pageNo={page + 1}"
 
-        log.info("  Naukri API failed, trying Playwright HTML scrape...")
-        search_url = f"https://www.naukri.com/{keyword.lower().replace(' ', '-')}-jobs-in-{location.lower().replace(' ', '-')}"
         html = fetch_page_html(search_url, wait_selector=".jobTuple,.title,.job-card")
         if not html:
             return []
@@ -115,7 +76,6 @@ class NaukriScraper(BaseScraper):
 
     def _parse_html_jobs(self, html: str, keyword: str, location: str) -> list:
         """Parse job listings from Naukri HTML page."""
-        import json as _json
         jobs = []
         seen_ids = set()
 
@@ -125,7 +85,7 @@ class NaukriScraper(BaseScraper):
             html, re.DOTALL,
         ):
             try:
-                data = _json.loads(m.group(1))
+                data = json.loads(m.group(1))
                 job_list = (
                     data.get("props", {})
                     .get("pageProps", {})
@@ -152,7 +112,7 @@ class NaukriScraper(BaseScraper):
                     })
                 if jobs:
                     return jobs
-            except (_json.JSONDecodeError, KeyError, TypeError):
+            except (json.JSONDecodeError, KeyError, TypeError):
                 continue
 
         # Fallback: parse from HTML structure

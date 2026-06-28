@@ -3,7 +3,6 @@
 import random
 import time
 import threading
-from typing import List, Optional
 
 
 USER_AGENTS = [

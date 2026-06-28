@@ -1,18 +1,13 @@
-"""Indeed.com scraper with pagination, per-keyword search, and rate limiting."""
+"""Indeed.com scraper — Playwright-only HTML scraping."""
 
 import datetime
-import gzip
 import json
 import logging
 import os
 import re
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from config import REQUEST_TIMEOUT
 from utils.base_scraper import BaseScraper
 from utils.playwright_helpers import fetch_page_html
 
@@ -39,19 +34,10 @@ class IndeedScraper(BaseScraper):
 
         fromage = max(1, job_age_hours // 24)
         start = page * 10
-        params = {
-            "q": keyword,
-            "l": location,
-            "start": str(start),
-            "sort": "date",
-            "fromage": str(fromage),
-        }
-        url = f"{INDEED_BASE}/jobs?{urllib.parse.urlencode(params)}"
+        params = f"q={keyword.replace(' ', '+')}&l={location.replace(' ', '+')}&start={start}&sort=date&fromage={fromage}"
+        url = f"{INDEED_BASE}/jobs?{params}"
 
-        html = self._fetch_html(url)
-        if not html:
-            log.info("  Indeed HTTP blocked, trying Playwright...")
-            html = fetch_page_html(url, wait_selector="[class*=job_seen_beacon],[class*=tapItem]")
+        html = fetch_page_html(url, wait_selector="[class*=job_seen_beacon],[class*=tapItem]")
         if not html:
             return []
 
@@ -87,25 +73,6 @@ class IndeedScraper(BaseScraper):
             "source": "Indeed",
             "keyword": keyword,
         }
-
-    def _fetch_html(self, url: str) -> str:
-        headers = self.rate_limiter.get_random_headers()
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
-            raw = resp.read()
-            if raw[:2] == b'\x1f\x8b':
-                raw = gzip.decompress(raw)
-            try:
-                return raw.decode("utf-8")
-            except UnicodeDecodeError:
-                return raw.decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            if e.code in (403, 429):
-                time.sleep(5)
-            return ""
-        except Exception:
-            return ""
 
     def _parse_mosaic(self, html: str, keyword: str, location: str) -> list:
         patterns = [
@@ -211,9 +178,7 @@ class IndeedScraper(BaseScraper):
         if not job_key:
             return ""
         url = f"{INDEED_BASE}/viewjob?jk={job_key}"
-        html = self._fetch_html(url)
-        if not html:
-            html = fetch_page_html(url, wait_selector="#jobDescriptionText")
+        html = fetch_page_html(url, wait_selector="#jobDescriptionText")
         if not html:
             return ""
 

@@ -4,14 +4,12 @@ import json
 import logging
 import os
 import re
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from groq_api import query_groq
 from config import (
-    SCORE_CACHE, JOBS_JSON, CV_FILE, SCORING_MODEL,
+    SCORE_CACHE, JOBS_JSON, CV_FILE,
     ROLE_WEIGHT, SKILLS_WEIGHT, EXP_WEIGHT, LOC_WEIGHT,
-    SALARY_WEIGHT, COMPANY_QUALITY_WEIGHT, RECENCY_WEIGHT, MIN_AI_SCORE,
+    RECENCY_WEIGHT, MIN_AI_SCORE,
 )
 
 log = logging.getLogger("agent")

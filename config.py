@@ -33,10 +33,6 @@ SEARCH_MODES: Dict[str, bool] = _search_config.get("search_modes", {
     "work_from_home": True,
     "india_wide": True,
 })
-EXPERIENCE_LEVELS: List[str] = _search_config.get("experience_levels", [
-    "Internship", "Fresher", "0-1 years", "1-3 years", "Mid level", "Experienced",
-])
-POSTED_WITHIN_HOURS: int = _search_config.get("posted_within_hours", 24)
 MAX_PAGES_PER_SEARCH: int = _search_config.get("max_pages_per_search", 10)
 MAX_WORKERS: int = _search_config.get("max_workers", 10)
 RATE_LIMIT_MIN: float = float(_search_config.get("rate_limit_min_seconds", 2))
@@ -53,18 +49,7 @@ ROLE_WEIGHT: float = _scoring_config.get("role_match_weight", 0.35)
 SKILLS_WEIGHT: float = _scoring_config.get("skills_match_weight", 0.25)
 EXP_WEIGHT: float = _scoring_config.get("experience_match_weight", 0.15)
 LOC_WEIGHT: float = _scoring_config.get("location_match_weight", 0.10)
-SALARY_WEIGHT: float = _scoring_config.get("salary_match_weight", 0.05)
-COMPANY_QUALITY_WEIGHT: float = _scoring_config.get("company_quality_weight", 0.05)
 RECENCY_WEIGHT: float = _scoring_config.get("recency_weight", 0.05)
-
-# ── Resume config ────────────────────────────────────────────────
-_resume_config: Dict[str, Any] = _search_config.get("resume", {})
-MAX_RESUME_PAGES: int = _resume_config.get("max_pages", 2)
-MIN_ATS_SCORE: int = _resume_config.get("min_ats_score", 90)
-REUSE_THRESHOLD: float = _resume_config.get("reuse_threshold_similarity", 0.85)
-
-# ── GitHub ────────────────────────────────────────────────────────
-GITHUB_USERNAME: str = _search_config.get("github_username", "heenakausher")
 
 # ── Blacklist ────────────────────────────────────────────────────
 BLACKLIST: List[str] = _load_json(
@@ -106,9 +91,7 @@ REQUEST_TIMEOUT = 30
 DUPLICATE_STOP_THRESHOLD = 0.5
 
 # ── Models ────────────────────────────────────────────────────────
-SCORING_MODEL = "llama-3.3-70b-versatile"
 GENERATION_MODEL = "llama-3.1-8b-instant"
-REVIEW_MODEL = "llama-3.3-70b-versatile"
 
 # ── File paths ────────────────────────────────────────────────────
 OUTPUT_DIR = "outputs"

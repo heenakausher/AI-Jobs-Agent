@@ -30,7 +30,6 @@ from config import (
     CLIENT_SECRET_FILE, TOKEN_FILE, SHEET_ID, SCOPES,
     GENERATION_MODEL, OUTPUT_DATE_DIR, MAX_WORKERS,
     HEALTH_CONSECUTIVE_ZERO_THRESHOLD, MAX_PAGES_PER_SEARCH,
-    GITHUB_USERNAME, REUSE_THRESHOLD, MIN_ATS_SCORE,
     SEARCH_KEYWORDS, SEARCH_CITIES, SEARCH_MODES,
 )
 from utils.fingerprint import Deduplicator
@@ -40,7 +39,6 @@ from utils.reports import (
 )
 from utils.dashboard import generate_dashboard
 from utils.metrics import MetricsTracker
-from utils.github_fetcher import get_github_projects_data
 
 logging.basicConfig(
     level=logging.INFO,

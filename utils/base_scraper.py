@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils.fingerprint import Deduplicator
 from utils.rate_limiter import RateLimiter
 from config import (
-    SEARCH_KEYWORDS, SEARCH_CITIES, SEARCH_MODES, EXPERIENCE_LEVELS,
+    SEARCH_KEYWORDS, SEARCH_CITIES, SEARCH_MODES,
     MAX_PAGES_PER_SEARCH, MAX_WORKERS, SCRAPE_CHECKPOINT,
-    REQUEST_TIMEOUT, DUPLICATE_STOP_THRESHOLD,
+    DUPLICATE_STOP_THRESHOLD,
 )
 
 log = logging.getLogger("agent")

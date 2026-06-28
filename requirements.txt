@@ -1,7 +1,5 @@
 python-docx==1.2.0
 fpdf2==2.8.7
 google-auth==2.55.0
-requests==2.34.2
 plotly==5.24.1
-tqdm==4.67.1
 playwright>=1.40.0

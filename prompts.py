@@ -1,6 +1,5 @@
 """Profile detection, resume prompts, and helpers with dynamic Groq classification."""
 
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
