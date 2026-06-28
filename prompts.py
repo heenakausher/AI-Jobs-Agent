@@ -24,7 +24,9 @@ PROFILES = {
     },
     "financial analyst": {
         "keywords": ["financial analysis", "fp&a", "budgeting", "forecasting", "excel",
-                     "financial statements", "variance analysis", "profitability", "cash flow"],
+                     "financial statements", "variance analysis", "profitability", "cash flow",
+                     "ms excel", "ms-office", "tally", "day-to-day accounting", "data entry",
+                     "financial record maintenance", "billing", "invoicing", "expense tracking"],
         "summary_focus": "financial analysis, FP&A, budgeting, forecasting",
         "skill_order": ["Finance & Accounting", "Data Analytics", "Visualization & Reporting", "Other Skills"],
     },
@@ -72,7 +74,9 @@ PROFILES = {
     },
     "fp&a": {
         "keywords": ["fp&a", "financial planning", "budgeting", "forecasting", "variance analysis",
-                     "financial modeling", "excel", "planning"],
+                     "financial modeling", "excel", "planning", "ms excel", "ms-office", "tally",
+                     "day-to-day accounting", "data entry", "financial record maintenance",
+                     "billing", "invoicing", "expense tracking"],
         "summary_focus": "financial planning & analysis, FP&A, budgeting, forecasting",
         "skill_order": ["Finance & Accounting", "Data Analytics", "Visualization & Reporting", "Other Skills"],
     },
@@ -221,6 +225,7 @@ ATS OPTIMIZATION:
 - Organize skills into categories from the candidate profile
 - Maximum 2 pages
 - Standard section headings: PROFESSIONAL SUMMARY, TECHNICAL SKILLS, WORK EXPERIENCE, GITHUB PROJECTS, EDUCATION, CERTIFICATIONS
+- CRITICAL: Output ONLY the resume sections. Do NOT add any preamble, explanation, or first-person notes like "I've added relevant keywords..." — just output the resume content directly.
 
 Use these exact delimiters:
 

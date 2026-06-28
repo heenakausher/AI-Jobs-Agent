@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from config import REQUEST_TIMEOUT
 from utils.base_scraper import BaseScraper
+from utils.playwright_helpers import fetch_page_html
 
 log = logging.getLogger("agent")
 
@@ -25,6 +26,10 @@ BASE_HEADERS = {
     "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.naukri.com/",
+    "Origin": "https://www.naukri.com",
+    "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not=A?Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
 }
 
 
@@ -58,20 +63,23 @@ class NaukriScraper(BaseScraper):
             req = urllib.request.Request(url, headers=BASE_HEADERS)
             resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
             data = json.loads(resp.read().decode())
+            raw_jobs = data.get("jobDetails", [])
+            if raw_jobs:
+                return raw_jobs
         except urllib.error.HTTPError as e:
             if e.code in (403, 429):
                 time.sleep(5)
-                return []
-            log.warning("  Naukri HTTP %s for %s/%s page %s", e.code, keyword, location, page + 1)
-            return []
+            log.warning("  Naukri API HTTP %s for %s/%s", e.code, keyword, location)
         except Exception as e:
-            log.debug("  Naukri error %s/%s page %s: %s", keyword, location, page + 1, e)
+            log.debug("  Naukri API error %s/%s: %s", keyword, location, e)
+
+        log.info("  Naukri API failed, trying Playwright HTML scrape...")
+        search_url = f"https://www.naukri.com/{keyword.lower().replace(' ', '-')}-jobs-in-{location.lower().replace(' ', '-')}"
+        html = fetch_page_html(search_url, wait_selector=".jobTuple,.title,.job-card")
+        if not html:
             return []
 
-        raw_jobs = data.get("jobDetails", [])
-        if not raw_jobs:
-            return []
-        return raw_jobs
+        return self._parse_html_jobs(html, keyword, location)
 
     def transform_job(self, raw: Dict[str, Any], keyword: str, category: str) -> Dict[str, Any]:
         title = (raw.get("title") or "").strip()
@@ -104,6 +112,79 @@ class NaukriScraper(BaseScraper):
             if label and "experience" not in label.lower():
                 return label
         return placeholders[0].get("label", "Hyderabad, India")
+
+    def _parse_html_jobs(self, html: str, keyword: str, location: str) -> list:
+        """Parse job listings from Naukri HTML page."""
+        import json as _json
+        jobs = []
+        seen_ids = set()
+
+        # Try extracting from embedded JSON data in script tags
+        for m in re.finditer(
+            r'<script[^>]*type="application/json"[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            html, re.DOTALL,
+        ):
+            try:
+                data = _json.loads(m.group(1))
+                job_list = (
+                    data.get("props", {})
+                    .get("pageProps", {})
+                    .get("searchResults", {})
+                    .get("jobDetails", [])
+                    or data.get("props", {})
+                    .get("pageProps", {})
+                    .get("jobList", [])
+                )
+                for j in job_list:
+                    jid = j.get("jobId") or j.get("id", "")
+                    if jid and jid in seen_ids:
+                        continue
+                    if jid:
+                        seen_ids.add(jid)
+                    jobs.append({
+                        "title": (j.get("title") or j.get("jobTitle", "")).strip(),
+                        "company": (j.get("companyName") or j.get("company", "")).strip(),
+                        "location": (j.get("location") or j.get("placeholders", [{}])[0].get("label", location)).strip(),
+                        "job_id": jid,
+                        "description": (j.get("jobDescription") or j.get("description", "")).strip(),
+                        "keyword": keyword,
+                        "url": f"https://www.naukri.com/job-details/{jid}" if jid else "",
+                    })
+                if jobs:
+                    return jobs
+            except (_json.JSONDecodeError, KeyError, TypeError):
+                continue
+
+        # Fallback: parse from HTML structure
+        for m in re.finditer(
+            r'<article[^>]*class="[^"]*jobTuple[^"]*"[^>]*>(.*?)</article>',
+            html, re.DOTALL,
+        ):
+            card = m.group(1)
+            title = ""
+            m2 = re.search(r'<a[^>]*class="[^"]*title[^"]*"[^>]*>(.*?)</a>', card, re.DOTALL)
+            if m2:
+                title = re.sub(r'<[^>]+>', ' ', m2.group(1)).strip()
+            company = ""
+            m2 = re.search(r'<a[^>]*class="[^"]*subTitle[^"]*"[^>]*>(.*?)</a>', card, re.DOTALL)
+            if m2:
+                company = re.sub(r'<[^>]+>', ' ', m2.group(1)).strip()
+            loc = location
+            m2 = re.search(r'<span[^>]*class="[^"]*loc[^"]*"[^>]*>(.*?)</span>', card, re.DOTALL)
+            if m2:
+                loc = re.sub(r'<[^>]+>', ' ', m2.group(1)).strip()
+            if not title:
+                continue
+            jobs.append({
+                "title": title,
+                "company": company or "Unknown Company",
+                "location": loc,
+                "job_id": f"naukri_{keyword}_{company}".replace(" ", "_"),
+                "description": "",
+                "keyword": keyword,
+                "url": "",
+            })
+        return jobs
 
 
 def fetch_all(job_age_hours: int = 24) -> List[Dict[str, Any]]:

@@ -1,6 +1,7 @@
 """LinkedIn scraper with pagination, per-keyword search, and rate limiting."""
 
 import datetime
+import gzip
 import json
 import logging
 import os
@@ -54,10 +55,13 @@ class LinkedInScraper(BaseScraper):
             return []
 
         jobs = []
-        for match in re.finditer(r'<li[^>]*class="[^"]*result-card[^"]*"[^>]*>(.*?)</li>', html, re.DOTALL):
-            card = match.group(1)
+        for match in re.finditer(
+            r'<div class="base-card[^>]*job-search-card[^>]*"(.*?)</div>\s*</li>',
+            html, re.DOTALL,
+        ):
+            card_html = match.group(0)
             try:
-                job = self._parse_card(card, keyword, location)
+                job = self._parse_card(card_html, keyword, location)
                 if job:
                     jobs.append(job)
             except Exception:
@@ -97,11 +101,14 @@ class LinkedInScraper(BaseScraper):
         try:
             req = urllib.request.Request(url, headers=headers)
             resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
-            html = resp.read()
+            raw = resp.read()
+            # Handle gzipped responses
+            if raw[:2] == b'\x1f\x8b':
+                raw = gzip.decompress(raw)
             try:
-                return html.decode("utf-8")
+                return raw.decode("utf-8")
             except UnicodeDecodeError:
-                return html.decode("utf-8", errors="replace")
+                return raw.decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             if e.code in (403, 429):
                 time.sleep(5)
@@ -111,36 +118,36 @@ class LinkedInScraper(BaseScraper):
 
     def _parse_card(self, html: str, keyword: str, location: str) -> dict:
         job_id = ""
-        m = re.search(r'/jobs/view/(\d+)', html)
+        m = re.search(r'data-entity-urn="urn:li:jobPosting:(\d+)"', html)
         if m:
             job_id = m.group(1)
         if not job_id:
-            m = re.search(r'data-job-id="(\d+)"', html)
+            m = re.search(r'/jobs/view/(\d+)', html)
             if m:
                 job_id = m.group(1)
 
         title = ""
-        m = re.search(r'<h3[^>]*class="[^"]*result-card__title[^"]*"[^>]*>\s*(.*?)\s*</h3>', html, re.DOTALL)
+        m = re.search(r'<h3 class="base-search-card__title">\s*(.*?)\s*</h3>', html, re.DOTALL)
         if m:
             title = self._clean_html(m.group(1))
-        if not title:
-            m = re.search(r'<a[^>]*class="[^"]*result-card__full-card[^"]*"[^>]*title="([^"]*)"', html)
-            if m:
-                title = m.group(1)
 
         company = ""
-        m = re.search(r'<h4[^>]*class="[^"]*result-card__subtitle[^"]*"[^>]*>\s*(.*?)\s*</h4>', html, re.DOTALL)
+        m = re.search(
+            r'<h4 class="base-search-card__subtitle">.*?<a[^>]*>\s*(.*?)\s*</a>',
+            html, re.DOTALL,
+        )
         if m:
             company = self._clean_html(m.group(1))
-        if not company:
-            m = re.search(r'<a[^>]*class="[^"]*result-card__subtitle-link[^"]*"[^>]*>\s*(.*?)\s*</a>', html, re.DOTALL)
-            if m:
-                company = self._clean_html(m.group(1))
 
         loc = location
-        m = re.search(r'<span[^>]*class="[^"]*job-result-card__location[^"]*"[^>]*>\s*(.*?)\s*</span>', html, re.DOTALL)
+        m = re.search(r'<span class="job-search-card__location">\s*(.*?)\s*</span>', html, re.DOTALL)
         if m:
             loc = self._clean_html(m.group(1))
+
+        job_url = ""
+        m = re.search(r'<a class="base-card__full-link[^"]*" href="([^"]+)"', html)
+        if m:
+            job_url = m.group(1)
 
         if not title and not job_id:
             return {}
@@ -152,7 +159,7 @@ class LinkedInScraper(BaseScraper):
             "job_id": f"linkedin_{job_id}" if job_id else f"linkedin_{keyword}_{company}".replace(" ", "_"),
             "description": "",
             "keyword": keyword,
-            "url": f"{LINKEDIN_BASE}/jobs/view/{job_id}" if job_id else "",
+            "url": job_url,
         }
 
     def _fetch_description(self, job_id: str) -> str:

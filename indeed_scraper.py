@@ -1,6 +1,7 @@
 """Indeed.com scraper with pagination, per-keyword search, and rate limiting."""
 
 import datetime
+import gzip
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from config import REQUEST_TIMEOUT
 from utils.base_scraper import BaseScraper
+from utils.playwright_helpers import fetch_page_html
 
 log = logging.getLogger("agent")
 
@@ -47,6 +49,9 @@ class IndeedScraper(BaseScraper):
         url = f"{INDEED_BASE}/jobs?{urllib.parse.urlencode(params)}"
 
         html = self._fetch_html(url)
+        if not html:
+            log.info("  Indeed HTTP blocked, trying Playwright...")
+            html = fetch_page_html(url, wait_selector="[class*=job_seen_beacon],[class*=tapItem]")
         if not html:
             return []
 
@@ -88,11 +93,13 @@ class IndeedScraper(BaseScraper):
         try:
             req = urllib.request.Request(url, headers=headers)
             resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
-            html = resp.read()
+            raw = resp.read()
+            if raw[:2] == b'\x1f\x8b':
+                raw = gzip.decompress(raw)
             try:
-                return html.decode("utf-8")
+                return raw.decode("utf-8")
             except UnicodeDecodeError:
-                return html.decode("utf-8", errors="replace")
+                return raw.decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             if e.code in (403, 429):
                 time.sleep(5)
@@ -205,6 +212,8 @@ class IndeedScraper(BaseScraper):
             return ""
         url = f"{INDEED_BASE}/viewjob?jk={job_key}"
         html = self._fetch_html(url)
+        if not html:
+            html = fetch_page_html(url, wait_selector="#jobDescriptionText")
         if not html:
             return ""
 

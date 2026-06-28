@@ -259,6 +259,20 @@ def _check_resume_reuse(
     return None
 
 
+def _strip_explanatory_notes(text: str) -> str:
+    """Remove any LLM-generated preamble/explanation from CV text."""
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        lowered = line.strip().lower()
+        if lowered.startswith(("i've", "i have", "i added", "i've added", "note:", "note -")):
+            continue
+        if "i've added relevant keywords" in lowered:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
 def generate_for_job(job: Dict[str, Any], cv_text: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int], str]:
     """Generate tailored CV, cover letter, prep topics, and acceptance chance."""
     profile = classify_job_profile(job)
@@ -281,7 +295,7 @@ Produce the 4 items for this role."""
 
     response = query_groq(system_prompt, user_prompt, model=GENERATION_MODEL)
 
-    cv = extract_delimited(response, "TAILORED_CV")
+    cv = _strip_explanatory_notes(extract_delimited(response, "TAILORED_CV"))
     cl = extract_delimited(response, "COVER_LETTER")
     prep = extract_delimited(response, "INTERVIEW_PREP")
     chance = extract_delimited(response, "ACCEPTANCE_CHANCE")
@@ -297,7 +311,7 @@ Produce the 4 items for this role."""
     # Quality review pass
     log.info("  Running quality review...")
     try:
-        cv = review_and_improve(cv, job.get("title", ""), job.get("description", ""))
+        cv = _strip_explanatory_notes(review_and_improve(cv, job.get("title", ""), job.get("description", "")))
     except Exception as e:
         log.warning("  Quality review skipped: %s", e)
 
