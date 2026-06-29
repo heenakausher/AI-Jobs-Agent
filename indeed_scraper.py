@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from utils.base_scraper import BaseScraper
 from utils.playwright_helpers import fetch_page_html
