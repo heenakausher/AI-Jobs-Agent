@@ -29,9 +29,14 @@ class NaukriScraper(BaseScraper):
     ) -> List[Dict[str, Any]]:
         self.rate_limiter.wait()
 
-        form_keyword = keyword.lower().replace(" ", "-")
-        form_location = location.lower().replace(" ", "-")
-        search_url = f"https://www.naukri.com/{form_keyword}-jobs-in-{form_location}"
+        import urllib.parse
+        form_keyword = keyword.lower().strip()
+        form_location = location.lower().strip()
+
+        search_url = (
+            f"https://www.naukri.com/"
+            f"{urllib.parse.quote(form_keyword)}-jobs-in-{urllib.parse.quote(form_location)}"
+        )
 
         if page > 0:
             search_url += f"?pageNo={page + 1}"

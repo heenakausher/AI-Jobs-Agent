@@ -74,41 +74,69 @@ class IndeedScraper(BaseScraper):
             "keyword": keyword,
         }
 
+    def _extract_json_balanced(self, text: str, start_marker: str) -> Optional[str]:
+        """Extract a JSON object from text starting after start_marker by balancing braces."""
+        idx = text.find(start_marker)
+        if idx == -1:
+            return None
+        start = idx + len(start_marker)
+        brace_depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == '\\' and not escape:
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+            if not in_string:
+                if ch == '{':
+                    if brace_depth == 0:
+                        start = i
+                    brace_depth += 1
+                elif ch == '}':
+                    brace_depth -= 1
+                    if brace_depth == 0:
+                        raw = text[start:i + 1]
+                        try:
+                            return json.loads(raw)
+                        except json.JSONDecodeError:
+                            return None
+            escape = False
+        return None
+
     def _parse_mosaic(self, html: str, keyword: str, location: str) -> list:
-        patterns = [
-            r'window\._initialData\s*=\s*(\{.+?\});',
-            r'window\.mosaic\.providerData\s*=\s*(\{.+?\});',
-        ]
-        for pat in patterns:
-            m = re.search(pat, html)
-            if m:
-                raw = m.group(1).replace("&q;", '"')
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
+        markers = ['window._initialData=', 'window.mosaic.providerData=']
+        for marker in markers:
+            data = self._extract_json_balanced(html, marker)
+            if not data:
+                continue
+            results = (
+                data.get("results")
+                or data.get("jobList")
+                or data.get("jobs")
+                or data.get("metaData", {}).get("results")
+                or data.get("searchMeta", {}).get("results")
+            )
+            if not results:
+                continue
+            parsed = []
+            for r in results:
+                jk = r.get("jk") or r.get("jobkey", "")
+                if not jk:
                     continue
-                results = data.get("results", []) or data.get("jobList", []) or data.get("jobs", [])
-                if not results:
-                    meta = data.get("metaData", {}) or data.get("searchMeta", {})
-                    results = meta.get("results", []) if meta else []
-                if not results:
-                    continue
-                parsed = []
-                for r in results:
-                    jk = r.get("jk") or r.get("jobkey", "")
-                    if not jk:
-                        continue
-                    parsed.append({
-                        "title": (r.get("title") or r.get("jobTitle", "")).strip(),
-                        "company": (r.get("company") or r.get("companyName", "")).strip(),
-                        "location": (r.get("location") or r.get("formattedLocation", location)).strip(),
-                        "job_id": f"indeed_{jk}",
-                        "job_key": jk,
-                        "description": self._clean_html(r.get("snippet", "") or r.get("description", "")),
-                        "keyword": keyword,
-                        "url": f"{INDEED_BASE}/viewjob?jk={jk}",
-                    })
-                return parsed
+                parsed.append({
+                    "title": (r.get("title") or r.get("jobTitle", "")).strip(),
+                    "company": (r.get("company") or r.get("companyName", "")).strip(),
+                    "location": (r.get("location") or r.get("formattedLocation", location)).strip(),
+                    "job_id": f"indeed_{jk}",
+                    "job_key": jk,
+                    "description": self._clean_html(r.get("snippet", "") or r.get("description", "")),
+                    "keyword": keyword,
+                    "url": f"{INDEED_BASE}/viewjob?jk={jk}",
+                })
+            return parsed
         return []
 
     def _parse_html_cards(self, html: str, keyword: str, location: str) -> list:

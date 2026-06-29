@@ -643,10 +643,22 @@ def main():
     cv_text = load_cv(CV_FILE)
     scored = load_json(SCORE_CACHE)
 
-    good = [r for r in scored if isinstance(r.get('score'), int) and r['score'] >= MIN_AI_SCORE]
-    good.sort(key=lambda x: x['score'], reverse=True)
+    if skip_score:
+        # Scoring was skipped — treat all non-blacklisted jobs as passing threshold
+        good = []
+        for job in all_jobs:
+            good.append({
+                "title": job.get("title", ""),
+                "company": job.get("company", ""),
+                "category": job.get("category", ""),
+                "score": MIN_AI_SCORE,
+                "location": job.get("location", ""),
+            })
+    else:
+        good = [r for r in scored if isinstance(r.get('score'), int) and r['score'] >= MIN_AI_SCORE]
+        good.sort(key=lambda x: x['score'], reverse=True)
 
-    metrics.increment("total_scored", len(scored))
+    metrics.increment("total_scored", len(scored) if not skip_score else len(all_jobs))
     metrics.increment("recommended", len(good))
 
     _print_separator("RECOMMENDED JOBS")
