@@ -56,17 +56,17 @@ def fetch_page_html(url: str, timeout_ms: int = 30000, wait_selector: Optional[s
             page = context.new_page()
 
             try:
-                page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                page.goto(url, wait_until="load", timeout=timeout_ms)
             except Exception as e:
                 log.debug("Playwright goto timeout/error: %s", e)
 
             if wait_selector:
                 try:
-                    page.wait_for_selector(wait_selector, timeout=5000)
+                    page.wait_for_selector(wait_selector, timeout=3000)
                 except Exception:
                     pass
 
-            time.sleep(2)
+            time.sleep(1)
             html = page.content()
             browser.close()
             return html

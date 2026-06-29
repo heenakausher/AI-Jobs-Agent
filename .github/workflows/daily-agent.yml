@@ -11,6 +11,7 @@ env:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -80,7 +81,7 @@ jobs:
 
       # ── Scrape all job sources in parallel ──────────────────────────
       - name: Scrape all job sources (parallel)
-        run: python main.py --fetch-naukri --fetch-indeed --fetch-linkedin --parallel --only-naukri
+        run: python main.py --parallel --skip-score --skip-generate
         continue-on-error: true
 
       # ── Auto-score new jobs ─────────────────────────────────────────
@@ -90,7 +91,7 @@ jobs:
 
       # ── Generate CVs, Cover Letters & upload to Google Sheets ───────
       - name: Generate CVs and Cover Letters
-        run: python main.py
+        run: python main.py --skip-scrape --skip-score
         continue-on-error: true
 
       # ── Cache: save updated cache files ─────────────────────────────
