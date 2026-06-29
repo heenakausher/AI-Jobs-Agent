@@ -572,6 +572,19 @@ def main():
     skip_scrape = "--skip-scrape" in sys.argv
     skip_score = "--skip-score" in sys.argv
     skip_generate = "--skip-generate" in sys.argv
+    max_jobs = None
+    gen_workers = 3
+    for i, arg in enumerate(sys.argv):
+        if arg == "--max-jobs" and i + 1 < len(sys.argv):
+            try:
+                max_jobs = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+        elif arg == "--workers" and i + 1 < len(sys.argv):
+            try:
+                gen_workers = int(sys.argv[i + 1])
+            except ValueError:
+                pass
 
     job_age_hours = 24
 
@@ -677,6 +690,14 @@ def main():
         return
 
     # ── Phase 5: Generate resumes ───────────────────────────────
+    completed = 0
+    failed = 0
+    skipped = 0
+    reused = 0
+    sheet_uploads = 0
+    sheet_failures = 0
+    applied_jobs_report = []
+
     if not skip_generate:
         _print_separator("GENERATION PHASE")
 
@@ -697,91 +718,107 @@ def main():
             all_jobs_map[key] = job
 
         progress = load_progress(PROGRESS_FILE)
-        completed = 0
-        failed = 0
-        skipped = 0
-        reused = 0
-        sheet_uploads = 0
-        sheet_failures = 0
-        applied_jobs_report = []
 
-        for i, r in enumerate(good, 1):
-            key = (r["title"], r["company"])
-            job = all_jobs_map.get(key)
-            if not job:
-                log.warning("[%s/%s] SKIP (no data): %s @ %s", i, len(good), r['title'], r['company'])
-                skipped += 1
-                continue
+        if max_jobs and max_jobs < len(good):
+            log.info("Limiting to %s jobs (--max-jobs)", max_jobs)
+            good = good[:max_jobs]
 
-            job_key = sanitize_folder_name(f"{r['company']}_{r['title']}")
-            if job_key in progress:
-                log.info("[%s/%s] SKIP (already done): %s @ %s", i, len(good), r['title'], r['company'])
-                skipped += 1
-                continue
+        def _gen_worker(job, r, cv_text):
+            """Thread worker: generate files, return result dict or None."""
+            log.info("  (Score: %s/10) %s @ %s", r['score'], r['title'], r['company'])
+            cv_result, cl_result, prep_result, chance_num, profile = generate_for_job(job, cv_text)
+            if not cv_result:
+                return None
+            from docx import Document as DocxDoc
+            folder_name = sanitize_folder_name(f"{r['company']}_{r['title']}")
+            folder_path = os.path.join(OUTPUT_DATE_DIR, folder_name)
+            os.makedirs(folder_path, exist_ok=True)
+            save_docx(cv_result, os.path.join(folder_path, "tailored_cv.docx"))
+            save_pdf(cv_result, os.path.join(folder_path, "tailored_cv.pdf"))
+            if cl_result:
+                save_docx(cl_result, os.path.join(folder_path, "cover_letter.docx"))
+                save_pdf(cl_result, os.path.join(folder_path, "cover_letter.pdf"))
+            return {
+                "folder_name": folder_name, "prep_result": prep_result,
+                "chance_num": chance_num, "profile": profile,
+            }
 
-            # Check resume reuse
-            reuse = _check_resume_reuse(job, progress, OUTPUT_DIR)
-            if reuse:
-                reused += 1
-                progress[job_key] = {"status": "reused", "folder": reuse}
-                save_progress(PROGRESS_FILE, progress)
-                continue
+        log.info("Generating with %s worker(s)...", gen_workers)
+        total = len(good)
+        with ThreadPoolExecutor(max_workers=gen_workers) as executor:
+            futures = {}
+            for i, r in enumerate(good, 1):
+                key = (r["title"], r["company"])
+                job = all_jobs_map.get(key)
+                if not job:
+                    log.warning("[%s/%s] SKIP (no data): %s @ %s", i, total, r['title'], r['company'])
+                    skipped += 1
+                    continue
 
-            log.info("[%s/%s] (Score: %s/10) %s @ %s", i, len(good), r['score'], r['title'], r['company'])
+                job_key = sanitize_folder_name(f"{r['company']}_{r['title']}")
+                if job_key in progress:
+                    log.info("[%s/%s] SKIP (already done): %s @ %s", i, total, r['title'], r['company'])
+                    skipped += 1
+                    continue
 
-            metrics.start_phase(f"gen_{i}")
-            try:
-                ok = False
-                cv_result, cl_result, prep_result, chance_num, profile = generate_for_job(job, cv_text)
-                if cv_result:
-                    from docx import Document as DocxDoc
-                    folder_name = sanitize_folder_name(f"{r['company']}_{r['title']}")
-                    folder_path = os.path.join(OUTPUT_DATE_DIR, folder_name)
-                    os.makedirs(folder_path, exist_ok=True)
+                reuse = _check_resume_reuse(job, progress, OUTPUT_DIR)
+                if reuse:
+                    reused += 1
+                    progress[job_key] = {"status": "reused", "folder": reuse}
+                    save_progress(PROGRESS_FILE, progress)
+                    continue
 
-                    save_docx(cv_result, os.path.join(folder_path, "tailored_cv.docx"))
-                    save_pdf(cv_result, os.path.join(folder_path, "tailored_cv.pdf"))
-                    if cl_result:
-                        save_docx(cl_result, os.path.join(folder_path, "cover_letter.docx"))
-                        save_pdf(cl_result, os.path.join(folder_path, "cover_letter.pdf"))
+                log.info("[%s/%s] Submitting: (Score: %s/10) %s @ %s", i, total, r['score'], r['title'], r['company'])
+                future = executor.submit(_gen_worker, job, r, cv_text)
+                futures[future] = (i, r, job, job_key)
 
-                    ok = True
-                    completed += 1
+            for future in as_completed(futures):
+                i, r, job, job_key = futures[future]
+                metrics.start_phase(f"gen_{i}")
+                try:
+                    result = future.result()
+                    if result:
+                        completed += 1
+                        folder_name = result["folder_name"]
+                        prep_result = result["prep_result"]
+                        chance_num = result["chance_num"]
+                        profile = result["profile"]
 
-                    # Sheets upload
-                    if sheets_token:
-                        match_pct = r['score'] * 10
-                        today = datetime.date.today().strftime("%Y-%m-%d")
-                        row = [
-                            r['title'], r['company'], match_pct,
-                            prep_result or "", chance_num or 50, "Applied", today,
-                        ]
-                        try:
-                            if append_sheet_row(sheets_token, row):
-                                sheet_uploads += 1
-                            else:
+                        if sheets_token:
+                            match_pct = r['score'] * 10
+                            today = datetime.date.today().strftime("%Y-%m-%d")
+                            row = [
+                                r['title'], r['company'], match_pct,
+                                prep_result or "", chance_num or 50, "Applied", today,
+                            ]
+                            try:
+                                if append_sheet_row(sheets_token, row):
+                                    sheet_uploads += 1
+                                else:
+                                    sheet_failures += 1
+                            except Exception as e:
+                                log.error("  Sheet append failed: %s", e)
                                 sheet_failures += 1
-                        except Exception as e:
-                            log.error("  Sheet append failed: %s", e)
-                            sheet_failures += 1
 
-                    applied_jobs_report.append({
-                        "title": r['title'],
-                        "company": r['company'],
-                        "location": job.get("location", ""),
-                        "score": r['score'],
-                        "profile": profile,
-                        "match_pct": r['score'] * 10,
-                        "folder": folder_name,
-                    })
-                    progress[job_key] = {"status": "done", "folder": folder_name}
+                        applied_jobs_report.append({
+                            "title": r['title'],
+                            "company": r['company'],
+                            "location": job.get("location", ""),
+                            "score": r['score'],
+                            "profile": profile,
+                            "match_pct": r['score'] * 10,
+                            "folder": folder_name,
+                        })
+                        progress[job_key] = {"status": "done", "folder": folder_name}
+                    else:
+                        log.warning("[%s/%s] No CV generated: %s @ %s", i, total, r['title'], r['company'])
 
-            except Exception as e:
-                log.error("  FAILED: %s", e)
-                failed += 1
+                except Exception as e:
+                    log.error("  FAILED [%s/%s] %s @ %s: %s", i, total, r['title'], r['company'], e)
+                    failed += 1
 
-            metrics.end_phase(f"gen_{i}")
-            save_progress(PROGRESS_FILE, progress)
+                metrics.end_phase(f"gen_{i}")
+                save_progress(PROGRESS_FILE, progress)
 
         log.info("Generation complete: %s completed, %s reused, %s skipped, %s failed",
                  completed, reused, skipped, failed)

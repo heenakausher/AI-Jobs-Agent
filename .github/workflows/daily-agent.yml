@@ -91,7 +91,7 @@ jobs:
 
       # ── Generate CVs, Cover Letters & upload to Google Sheets ───────
       - name: Generate CVs and Cover Letters
-        run: python main.py --skip-scrape --skip-score
+        run: python main.py --skip-scrape --skip-score --max-jobs 300 --workers 3
         continue-on-error: true
 
       # ── Cache: save updated cache files ─────────────────────────────
