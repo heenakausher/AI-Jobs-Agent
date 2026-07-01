@@ -89,7 +89,6 @@ def step2(redirect_url: str):
 
     expiry_dt = datetime.fromtimestamp(
         datetime.now(timezone.utc).timestamp() + token_data.get("expires_in", 3600),
-        tz=timezone.utc,
     )
     with open(TOKEN_FILE, "w") as f:
         json.dump({

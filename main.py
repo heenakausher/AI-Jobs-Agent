@@ -66,8 +66,15 @@ def get_sheets_token() -> str:
     if not tok.get("refresh_token"):
         log.error("token.json missing refresh_token. Re-run: python3 auth_sheets.py step1")
         raise ValueError("token.json missing refresh_token — run 'python3 auth_sheets.py step1' to re-authenticate")
+    from datetime import datetime
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request as AuthRequest
+    expiry = None
+    if tok.get("expiry"):
+        try:
+            expiry = datetime.fromisoformat(tok["expiry"]).replace(tzinfo=None)
+        except (ValueError, TypeError):
+            pass
     creds = Credentials(
         token=tok.get("token"),
         refresh_token=tok.get("refresh_token"),
@@ -75,6 +82,7 @@ def get_sheets_token() -> str:
         client_id=tok.get("client_id"),
         client_secret=tok.get("client_secret"),
         scopes=tok.get("scopes", SCOPES),
+        expiry=expiry,
     )
     if not creds.valid or not creds.token:
         log.info("Refreshing expired Google Sheets token...")
@@ -86,7 +94,7 @@ def get_sheets_token() -> str:
             log.error("Re-authenticate by running: python3 auth_sheets.py step1")
             raise
         tok["token"] = creds.token
-        tok["expiry"] = creds.expiry.isoformat() if creds.expiry else tok.get("expiry")
+        tok["expiry"] = creds.expiry.replace(tzinfo=None).isoformat() if creds.expiry else tok.get("expiry")
         with open(TOKEN_FILE, "w") as f:
             json.dump(tok, f, indent=2)
         log.info("Token refreshed successfully")
