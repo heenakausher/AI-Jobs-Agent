@@ -60,9 +60,12 @@ metrics = MetricsTracker()
 def get_sheets_token() -> str:
     if not os.path.exists(TOKEN_FILE):
         log.error("No token.json found. Run: python3 auth_sheets.py step1")
-        sys.exit(1)
+        raise FileNotFoundError("token.json not found — run 'python3 auth_sheets.py step1' first")
     with open(TOKEN_FILE) as f:
         tok = json.load(f)
+    if not tok.get("refresh_token"):
+        log.error("token.json missing refresh_token. Re-run: python3 auth_sheets.py step1")
+        raise ValueError("token.json missing refresh_token — run 'python3 auth_sheets.py step1' to re-authenticate")
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request as AuthRequest
     creds = Credentials(
@@ -73,35 +76,52 @@ def get_sheets_token() -> str:
         client_secret=tok.get("client_secret"),
         scopes=tok.get("scopes", SCOPES),
     )
-    if not creds.valid:
-        creds.refresh(AuthRequest())
+    if not creds.valid or not creds.token:
+        log.info("Refreshing expired Google Sheets token...")
+        try:
+            creds.refresh(AuthRequest())
+        except Exception as e:
+            log.error("Token refresh failed: %s", e)
+            log.error("Google Sheets access has expired or been revoked.")
+            log.error("Re-authenticate by running: python3 auth_sheets.py step1")
+            raise
         tok["token"] = creds.token
         tok["expiry"] = creds.expiry.isoformat() if creds.expiry else tok.get("expiry")
         with open(TOKEN_FILE, "w") as f:
             json.dump(tok, f, indent=2)
+        log.info("Token refreshed successfully")
     return creds.token
 
 
+SHEET_RANGE = "Sheet1"
+
 def _ensure_sheet_headers(token: str, max_retries: int = 3):
     import urllib.request, urllib.error
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/A1:G1"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/{SHEET_RANGE}!A1:G1"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         resp = urllib.request.urlopen(req, timeout=30)
         existing = json.loads(resp.read().decode())
         if existing.get("values"):
             return
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            body = e.read().decode()[:200]
+            log.error("Sheet API auth error: %s %s", e.code, body)
+            log.error("Your Google Sheets token is invalid or expired.")
+            log.error("Re-authenticate: python3 auth_sheets.py step1")
+            raise
+    except Exception:
         pass
 
     headers = ["Job Title", "Company", "Match %", "Prep Topics", "Acceptance Chance %", "Status", "Date"]
-    header_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/A1:G1?valueInputOption=USER_ENTERED"
+    header_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/{SHEET_RANGE}!A1:G1?valueInputOption=USER_ENTERED"
     body = json.dumps({"values": [headers]}).encode()
     for attempt in range(1, max_retries + 1):
         try:
             req = urllib.request.Request(header_url, data=body, headers={
                 "Authorization": f"Bearer {token}", "Content-Type": "application/json",
-            })
+            }, method="PUT")
             urllib.request.urlopen(req, timeout=30)
             return
         except Exception as e:
@@ -111,22 +131,27 @@ def _ensure_sheet_headers(token: str, max_retries: int = 3):
 
 def append_sheet_row(token: str, row: list, max_retries: int = 3) -> bool:
     import urllib.request, urllib.error
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/A:G:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/{SHEET_RANGE}!A:G:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
     body = json.dumps({"values": [row]}).encode()
     for attempt in range(1, max_retries + 1):
         try:
             req = urllib.request.Request(url, data=body, headers={
                 "Authorization": f"Bearer {token}", "Content-Type": "application/json",
             })
-            urllib.request.urlopen(req, timeout=30)
+            resp = urllib.request.urlopen(req, timeout=30)
+            resp.read()
             return True
         except urllib.error.HTTPError as e:
             body_text = e.read().decode()[:200]
+            if e.code == 403:
+                log.error("  Sheet append failed — token expired/revoked. Re-auth needed: python3 auth_sheets.py step1")
+                return False
             if e.code in (429, 500, 502, 503) and attempt < max_retries:
                 time.sleep(attempt * 5)
                 continue
-            log.error("  Sheet append error: %s %s", e.code, body_text)
-            return False
+            log.warning("  Sheet append error (attempt %s/%s): %s %s", attempt, max_retries, e.code, body_text)
+            if attempt == max_retries:
+                return False
         except urllib.error.URLError as e:
             if attempt < max_retries:
                 time.sleep(attempt * 5)
@@ -381,6 +406,7 @@ def _which_section(line: str):
         ("TECHNICAL SKILLS", "skills"),
         ("WORK EXPERIENCE", "work"),
         ("GITHUB PROJECTS", "projects"),
+        ("DSA PROJECTS", "dsa_projects"),
         ("EDUCATION", "education"),
         ("CERTIFICATIONS", "certs"),
     ]
@@ -394,6 +420,8 @@ def _which_section(line: str):
                 return "work"
             if kw.startswith("GITHUB"):
                 return "projects"
+            if kw.startswith("DSA"):
+                return "dsa_projects"
             if kw.startswith("EDUCATION"):
                 return "education"
             if kw.startswith("CERTIFICATION"):
@@ -432,6 +460,38 @@ def _render_docx(doc: Document, lines: list) -> None:
                 p.style.font.size = Pt(9.5)
             continue
 
+        if current_section == "work":
+            if not line.startswith("-") and "—" in line:
+                p = doc.add_paragraph()
+                run = p.add_run(line)
+                run.bold = True
+                run.font.size = Pt(10.5)
+            elif not line.startswith("-"):
+                p = doc.add_paragraph()
+                run = p.add_run(line)
+                run.bold = True
+                run.font.size = Pt(10)
+            elif line.startswith("-"):
+                p = doc.add_paragraph(style='List Bullet')
+                p.text = line.lstrip("- ").strip()
+            continue
+
+        if current_section in ("projects", "dsa_projects"):
+            if not line.startswith("-") and not line.startswith("GitHub") and not line.startswith("GreatLearning"):
+                p = doc.add_paragraph()
+                run = p.add_run(line)
+                run.bold = True
+                run.font.size = Pt(10)
+            elif line.startswith("GitHub") or line.startswith("GreatLearning"):
+                p = doc.add_paragraph()
+                run = p.add_run(line)
+                run.font.size = Pt(9)
+                run.font.color.rgb = _NAVY
+            elif line.startswith("-"):
+                p = doc.add_paragraph(style='List Bullet')
+                p.text = line.lstrip("- ").strip()
+            continue
+
         if line.startswith("-"):
             p = doc.add_paragraph(style='List Bullet')
             p.text = line.lstrip("- ").strip()
@@ -460,12 +520,56 @@ def _render_pdf(pdf: FPDF, lines: list) -> None:
             pdf.multi_cell(avail_w, 5.5, line)
             continue
 
+        if current_section == "skills":
+            if line.startswith("-"):
+                pdf.set_font("DejaVu", "", 9)
+                pdf.set_x(lm + 6)
+                pdf.multi_cell(avail_w - 6, 5, "- " + line.lstrip("- ").strip())
+            else:
+                pdf.set_font("DejaVu", "B", 10)
+                pdf.set_x(lm)
+                pdf.multi_cell(avail_w, 5.5, line)
+            continue
+
+        if current_section == "work":
+            if not line.startswith("-") and "—" in line:
+                pdf.set_font("DejaVu", "B", 10.5)
+                pdf.set_x(lm)
+                pdf.multi_cell(avail_w, 6, line)
+            elif not line.startswith("-"):
+                pdf.set_font("DejaVu", "B", 10)
+                pdf.set_x(lm)
+                pdf.multi_cell(avail_w, 5.5, line)
+            elif line.startswith("-"):
+                pdf.set_font("DejaVu", "", 9)
+                pdf.set_x(lm + 6)
+                pdf.multi_cell(avail_w - 6, 5, "- " + line.lstrip("- ").strip())
+            continue
+
+        if current_section in ("projects", "dsa_projects"):
+            if line.startswith("GitHub") or line.startswith("GreatLearning"):
+                pdf.set_font("DejaVu", "", 8.5)
+                pdf.set_text_color(0x1F, 0x3A, 0x5F)
+                pdf.set_x(lm)
+                pdf.multi_cell(avail_w, 4.5, line)
+                pdf.set_text_color(0, 0, 0)
+            elif line.startswith("-"):
+                pdf.set_font("DejaVu", "", 9)
+                pdf.set_x(lm + 6)
+                pdf.multi_cell(avail_w - 6, 5, "- " + line.lstrip("- ").strip())
+            else:
+                pdf.set_font("DejaVu", "B", 10)
+                pdf.set_x(lm)
+                pdf.multi_cell(avail_w, 5.5, line)
+            continue
+
         if line.startswith("-"):
             pdf.set_font("DejaVu", "", 9)
-            pdf.set_x(lm + 4)
-            pdf.multi_cell(avail_w - 4, 5, line.lstrip("- ").strip())
+            pdf.set_x(lm + 6)
+            pdf.multi_cell(avail_w - 6, 5, "- " + line.lstrip("- ").strip())
         else:
             pdf.set_font("DejaVu", "", 9.5)
+            pdf.set_x(lm)
             pdf.multi_cell(avail_w, 5.5, line)
 
 
@@ -788,13 +892,14 @@ def main():
     if not skip_generate:
         _print_separator("GENERATION PHASE")
 
-        log.info("Getting Google Sheets token...")
+        log.info("Connecting to Google Sheets...")
         sheets_token = None
         try:
             sheets_token = get_sheets_token()
             _ensure_sheet_headers(sheets_token)
+            log.info("Google Sheets ready")
         except Exception as e:
-            log.warning("  Sheets auth failed: %s", e)
+            log.warning("  Google Sheets auth/init failed — jobs will not be uploaded to sheet: %s", e)
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         os.makedirs(OUTPUT_DATE_DIR, exist_ok=True)
@@ -895,7 +1000,7 @@ def main():
                                 else:
                                     sheet_failures += 1
                             except Exception as e:
-                                log.error("  Sheet append failed: %s", e)
+                                log.error("  Sheet append failed: %s @ %s: %s", r['title'], r['company'], e)
                                 sheet_failures += 1
 
                         applied_jobs_report.append({
@@ -920,6 +1025,7 @@ def main():
 
         log.info("Generation complete: %s completed, %s reused, %s skipped, %s failed",
                  completed, reused, skipped, failed)
+        log.info("Sheet updates: %s uploaded, %s failed", sheet_uploads, sheet_failures)
 
         write_applied_jobs(applied_jobs_report)
 

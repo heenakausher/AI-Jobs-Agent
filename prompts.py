@@ -124,6 +124,30 @@ PROJECTS_DATA = [
     },
 ]
 
+DSA_PROJECTS_DATA = [
+    {
+        "title": "FoodHub Order Analysis using Python",
+        "description": "Performed exploratory data analysis on food aggregator order data using Python (Pandas, NumPy, Seaborn) to uncover demand patterns across restaurants and cuisines.",
+        "impact": "Delivered actionable business recommendations to enhance customer experience and optimize restaurant partnerships based on data-driven insights.",
+        "technologies": "Python, Pandas, NumPy, Seaborn, EDA, Data Visualization",
+        "url": "https://www.mygreatlearning.com/eportfolio/heena-kausher",
+    },
+    {
+        "title": "Data-Driven Revitalization: New-Wheels Sales Analysis",
+        "description": "Leveraged advanced SQL analytics — joins, subqueries, window functions — to analyze customer feedback and sales data for a vehicle resale platform.",
+        "impact": "Provided CEO with critical insights for informed decision-making and business revival strategy.",
+        "technologies": "SQL, MySQL, Joins, Subqueries, Window Functions, Analytical Queries",
+        "url": "https://www.mygreatlearning.com/eportfolio/heena-kausher",
+    },
+    {
+        "title": "Bank Customer Churn Prediction using Neural Networks",
+        "description": "Built a neural network model to analyze customer data and predict churn likelihood using deep learning techniques.",
+        "impact": "Enabled operations team to proactively identify at-risk customers and implement retention strategies, reducing churn rate.",
+        "technologies": "Python, Neural Networks, TensorFlow, Keras, Classification, Deep Learning",
+        "url": "https://www.mygreatlearning.com/eportfolio/heena-kausher",
+    },
+]
+
 
 def detect_profile(job_title: str, job_description: str, category: str = "") -> str:
     """Detect the best-matching profile for a job using title + keyword matching."""
@@ -212,6 +236,8 @@ def build_system_prompt(profile: str, cv_text: str, job_description: str = "") -
     profile_config = PROFILES.get(profile, PROFILES["data analyst"])
     projects = _rank_projects_by_relevance(PROJECTS_DATA, job_description)
     projects_text = _format_projects_for_prompt(projects)
+    dsa_projects = _rank_projects_by_relevance(DSA_PROJECTS_DATA, job_description)
+    dsa_projects_text = _format_dsa_projects_for_prompt(dsa_projects)
 
     return f"""You are an expert ATS optimization specialist, professional resume writer, and career coach.
 
@@ -233,7 +259,7 @@ ATS OPTIMIZATION:
 - Use STAR/CAR format for experience bullets
 - Organize skills into categories from the candidate profile
 - Maximum 2 pages
-- Standard section headings: PROFESSIONAL SUMMARY, TECHNICAL SKILLS, WORK EXPERIENCE, GITHUB PROJECTS, EDUCATION, CERTIFICATIONS
+- Standard section headings: PROFESSIONAL SUMMARY, TECHNICAL SKILLS, WORK EXPERIENCE, GITHUB PROJECTS, DSA PROJECTS, EDUCATION, CERTIFICATIONS
 - CRITICAL: Output ONLY the resume sections. Do NOT add any preamble, explanation, or first-person notes like "I've added relevant keywords..." — just output the resume content directly.
 
 Use these exact delimiters:
@@ -260,6 +286,9 @@ WORK EXPERIENCE
 
 GITHUB PROJECTS
 {projects_text}
+
+DSA PROJECTS
+{dsa_projects_text}
 
 EDUCATION
 - MBA - Banking & Finance, NMIMS CDOE | 67.33%
@@ -292,6 +321,17 @@ def _format_projects_for_prompt(projects: list) -> str:
         lines.append(f"- {proj['description']}")
         lines.append(f"- {proj['impact']}")
         lines.append(f"GitHub: {proj['url']}")
+    return "\n".join(lines)
+
+
+def _format_dsa_projects_for_prompt(projects: list) -> str:
+    lines = []
+    for i, proj in enumerate(projects, 1):
+        lines.append(f"Project {i}: {proj['title']}")
+        lines.append(f"Technologies: {proj['technologies']}")
+        lines.append(f"- {proj['description']}")
+        lines.append(f"- {proj['impact']}")
+        lines.append(f"GreatLearning: {proj['url']}")
     return "\n".join(lines)
 
 
