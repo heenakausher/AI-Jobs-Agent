@@ -45,6 +45,7 @@ WEBSITES: Dict[str, bool] = _search_config.get("websites", {
 # ── Scoring config ────────────────────────────────────────────────
 _scoring_config: Dict[str, Any] = _search_config.get("scoring", {})
 MIN_AI_SCORE: int = _scoring_config.get("min_score_threshold", 6)
+TARGET_JOBS_COUNT: int = _search_config.get("target_jobs_count", 50)
 ROLE_WEIGHT: float = _scoring_config.get("role_match_weight", 0.35)
 SKILLS_WEIGHT: float = _scoring_config.get("skills_match_weight", 0.25)
 EXP_WEIGHT: float = _scoring_config.get("experience_match_weight", 0.15)

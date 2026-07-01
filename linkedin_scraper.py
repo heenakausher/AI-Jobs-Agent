@@ -24,8 +24,8 @@ TIME_FILTERS = {24: "r86400"}
 class LinkedInScraper(BaseScraper):
     """LinkedIn job scraper."""
 
-    def __init__(self) -> None:
-        super().__init__("LinkedIn")
+    def __init__(self, stop_event: Any = None) -> None:
+        super().__init__("LinkedIn", stop_event=stop_event)
 
     def search_keyword(
         self,
@@ -191,8 +191,8 @@ class LinkedInScraper(BaseScraper):
         return text
 
 
-def fetch_all(job_age_hours: int = 24) -> List[Dict[str, Any]]:
-    scraper = LinkedInScraper()
+def fetch_all(job_age_hours: int = 24, stop_event: Any = None) -> List[Dict[str, Any]]:
+    scraper = LinkedInScraper(stop_event=stop_event)
     return scraper.search_all_variants(job_age_hours=job_age_hours)
 
 

@@ -179,6 +179,22 @@ def _score_recency(job: Dict[str, Any]) -> Tuple[float, str]:
         return 0.5 * 10 * RECENCY_WEIGHT, "Date parse error"
 
 
+def score_single_job_to_entry(job: Dict[str, Any], cv_text: str) -> Optional[Dict[str, Any]]:
+    """Score a single job and return a cache-ready entry dict, or None on failure."""
+    try:
+        score, reason, breakdown = score_single_job(job, cv_text)
+        return {
+            "title": job.get("title", ""),
+            "company": job.get("company", ""),
+            "category": job.get("category", "N/A"),
+            "score": score,
+            "reason": reason,
+            **breakdown,
+        }
+    except Exception:
+        return None
+
+
 def score_single_job(job: Dict[str, Any], cv_text: str) -> Tuple[int, str, Dict[str, float]]:
     """Score a single job using weighted criteria.
 
@@ -205,6 +221,13 @@ def score_single_job(job: Dict[str, Any], cv_text: str) -> Tuple[int, str, Dict[
     reason = f"Role: {role_detail} | Skills: {skills_detail} | Exp: {exp_detail}"
 
     return total, reason, breakdown
+
+
+def append_single_score(score_entry: Dict[str, Any]) -> None:
+    """Append a single scored job entry to score_cache.json."""
+    existing = _load_json(SCORE_CACHE)
+    existing.append(score_entry)
+    _save_json(SCORE_CACHE, existing)
 
 
 def score_all_unscored() -> int:

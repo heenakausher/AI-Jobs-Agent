@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,8 +51,9 @@ class ScraperStats:
 class BaseScraper(ABC):
     """Base class for job scrapers with pagination, rate limiting, and checkpointing."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, stop_event: Optional[threading.Event] = None) -> None:
         self.name = name
+        self.stop_event = stop_event
         self.stats = ScraperStats()
         self.dedup = Deduplicator()
         self.rate_limiter = RateLimiter()
@@ -131,12 +133,20 @@ class BaseScraper(ABC):
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {}
             for keyword, category, location, mode in all_variants:
+                if self.stop_event and self.stop_event.is_set():
+                    log.info("  %s: Early stop — target reached, skipping remaining variants", self.name)
+                    break
                 future = executor.submit(
                     self._search_single_variant, keyword, category, location, mode, job_age_hours
                 )
                 futures[future] = (keyword, location, mode)
 
             for future in as_completed(futures):
+                if self.stop_event and self.stop_event.is_set():
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
                 keyword, location, mode = futures[future]
                 try:
                     jobs, duration = future.result()
@@ -182,6 +192,8 @@ class BaseScraper(ABC):
         seen_ids: set = set()
 
         for page in range(MAX_PAGES_PER_SEARCH):
+            if self.stop_event and self.stop_event.is_set():
+                break
             try:
                 raw_jobs = self.search_keyword(keyword, category, location, page, job_age_hours)
             except Exception as e:

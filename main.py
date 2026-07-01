@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +32,7 @@ from config import (
     GENERATION_MODEL, OUTPUT_DATE_DIR, MAX_WORKERS,
     HEALTH_CONSECUTIVE_ZERO_THRESHOLD, MAX_PAGES_PER_SEARCH,
     SEARCH_KEYWORDS, SEARCH_CITIES, SEARCH_MODES,
+    TARGET_JOBS_COUNT,
 )
 from utils.fingerprint import Deduplicator
 from utils.reports import (
@@ -276,7 +278,7 @@ def generate_for_job(job: Dict[str, Any], cv_text: str) -> Tuple[Optional[str], 
     profile = classify_job_profile(job)
     log.info("  Target profile: %s", profile)
 
-    system_prompt = build_system_prompt(profile, cv_text)
+    system_prompt = build_system_prompt(profile, cv_text, job.get("description", ""))
     user_prompt = f"""TARGET JOB:
 Title: {job['title']}
 Company: {job['company']}
@@ -448,7 +450,7 @@ def _render_pdf(pdf: FPDF, lines: list) -> None:
         if sec:
             pdf.set_font("DejaVu", "B", 11)
             pdf.set_text_color(0x1F, 0x3A, 0x5F)
-            pdf.cell(avail_w, 7, line.upper(), new_x="LMARGIN", new_y="NEXT")
+            pdf.multi_cell(avail_w, 7, line.upper(), align="L")
             pdf.set_text_color(0, 0, 0)
             current_section = sec
             continue
@@ -469,7 +471,7 @@ def _render_pdf(pdf: FPDF, lines: list) -> None:
 
 # ── Scraping phase ─────────────────────────────────────────────
 
-def run_scraper_internal(scraper_module, name: str, job_age_hours: int) -> Tuple[List[Dict], int, Dict]:
+def run_scraper_internal(scraper_module, name: str, job_age_hours: int, stop_event: threading.Event = None) -> Tuple[List[Dict], int, Dict]:
     """Run a scraper module and merge results."""
     total_jobs = []
     total_new = 0
@@ -477,7 +479,7 @@ def run_scraper_internal(scraper_module, name: str, job_age_hours: int) -> Tuple
 
     try:
         if hasattr(scraper_module, 'fetch_all') and callable(scraper_module.fetch_all):
-            jobs = scraper_module.fetch_all(job_age_hours=job_age_hours)
+            jobs = scraper_module.fetch_all(job_age_hours=job_age_hours, stop_event=stop_event)
         else:
             jobs = scraper_module.fetch_all()
 
@@ -498,12 +500,22 @@ def run_scraper_internal(scraper_module, name: str, job_age_hours: int) -> Tuple
     return total_jobs, total_new, scraper_stats
 
 
-def run_scraping_phase(parallel: bool, job_age_hours: int) -> Tuple[List[Dict], Dict, Dict]:
-    """Run configured scrapers and return deduplicated jobs + stats."""
+def run_scraping_phase(
+    parallel: bool, job_age_hours: int,
+    target_jobs: int = 0, cv_text: str = "",
+) -> Tuple[List[Dict], Dict, Dict, List[Dict]]:
+    """Run configured scrapers, score in real-time, stop when target_jobs high-scoring jobs collected.
+
+    Returns (all_fetched_jobs, source_stats, health_data, good_jobs).
+    When target_jobs <= 0, scoring is skipped and good_jobs is empty.
+    """
     _print_separator("SCRAPING PHASE")
     metrics.start_phase("scraping")
 
+    stop_event = threading.Event()
     all_jobs = []
+    good_jobs: List[Dict] = []
+    good_jobs_lock = threading.Lock()
     source_stats = {}
     health_data = _load_health()
 
@@ -518,43 +530,98 @@ def run_scraping_phase(parallel: bool, job_age_hours: int) -> Tuple[List[Dict], 
 
     if not scraper_configs:
         log.warning("No scrapers enabled in search_config.json")
-        return [], source_stats, health_data
+        return [], source_stats, health_data, []
 
     log.info("Job age filter: %d hours", job_age_hours)
+    if target_jobs > 0:
+        log.info("Target: %s high-scoring jobs (score >= %s)", target_jobs, MIN_AI_SCORE)
+
+    # Load already-scored keys to avoid duplicate scoring
+    existing_scores = load_json(SCORE_CACHE)
+    already_scored: set = set()
+    for s in existing_scores:
+        already_scored.add((s.get("title", ""), s.get("company", "")))
+
+    def _score_and_collect(jobs_list: List[Dict]) -> None:
+        """Score a batch of new jobs and collect those above threshold."""
+        for job in jobs_list:
+            if stop_event.is_set():
+                return
+            key = (job.get("title", ""), job.get("company", ""))
+            if key in already_scored:
+                continue
+            already_scored.add(key)
+            try:
+                entry = auto_scorer.score_single_job_to_entry(job, cv_text)
+                if entry is None:
+                    continue
+                auto_scorer.append_single_score(entry)
+                if entry["score"] >= MIN_AI_SCORE:
+                    with good_jobs_lock:
+                        good_jobs.append(entry)
+                        if len(good_jobs) >= target_jobs:
+                            log.info(
+                                "Target of %s high-scoring jobs reached! Stopping scrapers.",
+                                target_jobs,
+                            )
+                            stop_event.set()
+                            return
+            except Exception as e:
+                log.warning("  Score failed for %s @ %s: %s",
+                            job.get("title"), job.get("company"), e)
 
     if parallel and len(scraper_configs) > 1:
         log.info("Running scrapers in parallel mode...")
         with ThreadPoolExecutor(max_workers=len(scraper_configs)) as executor:
             futures = {}
             for mod, name in scraper_configs:
-                future = executor.submit(run_scraper_internal, mod, name, job_age_hours)
-                futures[future] = name
+                future = executor.submit(
+                    run_scraper_internal, mod, name, job_age_hours, stop_event,
+                )
+                futures[future] = (mod, name)
 
             for future in as_completed(futures):
-                name = futures[future]
+                if stop_event.is_set():
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
+                mod, name = futures[future]
                 try:
                     jobs, added, stats = future.result()
                     log.info("%s: %s jobs fetched, %s new", name, len(jobs), added)
                     source_stats[name.lower()] = stats
                     health_data = _detect_broken_scraper(name, len(jobs), health_data)
                     all_jobs.extend(jobs)
+                    if target_jobs > 0 and cv_text:
+                        _score_and_collect(jobs)
                 except Exception as e:
                     log.error("  %s scraper failed: %s", name, e)
                     source_stats[name.lower()] = {}
                     health_data = _detect_broken_scraper(name, 0, health_data)
     else:
         for mod, name in scraper_configs:
+            if stop_event.is_set():
+                log.info("%s: skipped (target reached)", name)
+                continue
             log.info("Fetching %s jobs...", name)
-            jobs, added, stats = run_scraper_internal(mod, name, job_age_hours)
+            jobs, added, stats = run_scraper_internal(mod, name, job_age_hours, stop_event)
             log.info("%s: %s jobs fetched, %s new", name, len(jobs), added)
             source_stats[name.lower()] = stats
             health_data = _detect_broken_scraper(name, len(jobs), health_data)
             all_jobs.extend(jobs)
+            if target_jobs > 0 and cv_text:
+                _score_and_collect(jobs)
 
     _save_health(health_data)
     metrics.end_phase("scraping")
 
-    return all_jobs, source_stats, health_data
+    good_jobs.sort(key=lambda x: x["score"], reverse=True)
+    if target_jobs > 0:
+        log.info("Scraping complete: %s total jobs, %s high-scoring (score >= %s)",
+                 len(all_jobs), len(good_jobs), MIN_AI_SCORE)
+
+    return all_jobs, source_stats, health_data, good_jobs[:target_jobs] if target_jobs > 0 else []
 
 
 def log_scraper_results(name: str, jobs: list, added: int) -> None:
@@ -574,6 +641,7 @@ def main():
     skip_generate = "--skip-generate" in sys.argv
     max_jobs = None
     gen_workers = 3
+    target_jobs = TARGET_JOBS_COUNT
     for i, arg in enumerate(sys.argv):
         if arg == "--max-jobs" and i + 1 < len(sys.argv):
             try:
@@ -585,16 +653,34 @@ def main():
                 gen_workers = int(sys.argv[i + 1])
             except ValueError:
                 pass
+        elif arg == "--target-jobs" and i + 1 < len(sys.argv):
+            try:
+                target_jobs = int(sys.argv[i + 1])
+            except ValueError:
+                pass
 
     job_age_hours = 24
 
     all_fetched_jobs = []
     source_stats = {}
     health_data = {}
+    scored_during_scrape = False
+    good = []
 
-    # ── Phase 1: Scrape ─────────────────────────────────────────
+    # ── Phase 1: Scrape + optional real-time scoring ────────────
+    cv_text = ""  # loaded before scrape if scoring during scrape
     if not skip_scrape:
-        all_fetched_jobs, source_stats, health_data = run_scraping_phase(parallel, job_age_hours)
+        do_realtime_scoring = not skip_score and target_jobs > 0
+        if do_realtime_scoring:
+            cv_text = load_cv(CV_FILE)
+            log.info("Real-time scoring enabled: target %s high-scoring jobs", target_jobs)
+
+        all_fetched_jobs, source_stats, health_data, good = run_scraping_phase(
+            parallel, job_age_hours,
+            target_jobs=target_jobs if do_realtime_scoring else 0,
+            cv_text=cv_text if do_realtime_scoring else "",
+        )
+        scored_during_scrape = bool(good)
 
         # Cross-platform dedup
         metrics.start_phase("dedup")
@@ -639,11 +725,12 @@ def main():
     log.info("Blacklist filter: %s rejected, %s kept", len(rejected_jobs), len(all_jobs))
     metrics.end_phase("filter")
 
-    # ── Phase 3: Score ──────────────────────────────────────────
-    if not skip_score:
+    # ── Phase 3: Score (only if not already scored during scrape) ──
+    if not skip_score and not scored_during_scrape:
         metrics.start_phase("scoring")
         _print_separator("SCORING PHASE")
         log.info("Running weighted auto-scorer...")
+        cv_text = load_cv(CV_FILE)
         try:
             added_scores = auto_scorer.score_all_unscored()
             log.info("Scored %s new jobs", added_scores)
@@ -653,25 +740,25 @@ def main():
         metrics.end_phase("scoring")
 
     # ── Phase 4: Load scores & get recommended ──────────────────
-    cv_text = load_cv(CV_FILE)
-    scored = load_json(SCORE_CACHE)
+    if not good:
+        if not cv_text:
+            cv_text = load_cv(CV_FILE)
+        scored = load_json(SCORE_CACHE)
 
-    if skip_score:
-        # Scoring was skipped — treat all non-blacklisted jobs as passing threshold
-        good = []
-        for job in all_jobs:
-            good.append({
-                "title": job.get("title", ""),
-                "company": job.get("company", ""),
-                "category": job.get("category", ""),
-                "score": MIN_AI_SCORE,
-                "location": job.get("location", ""),
-            })
-    else:
-        good = [r for r in scored if isinstance(r.get('score'), int) and r['score'] >= MIN_AI_SCORE]
-        good.sort(key=lambda x: x['score'], reverse=True)
+        if skip_score:
+            for job in all_jobs:
+                good.append({
+                    "title": job.get("title", ""),
+                    "company": job.get("company", ""),
+                    "category": job.get("category", ""),
+                    "score": MIN_AI_SCORE,
+                    "location": job.get("location", ""),
+                })
+        else:
+            good = [r for r in scored if isinstance(r.get('score'), (int, float)) and r['score'] >= MIN_AI_SCORE]
+            good.sort(key=lambda x: x['score'], reverse=True)
 
-    metrics.increment("total_scored", len(scored) if not skip_score else len(all_jobs))
+    metrics.increment("total_scored", len(load_json(SCORE_CACHE)))
     metrics.increment("recommended", len(good))
 
     _print_separator("RECOMMENDED JOBS")
@@ -718,6 +805,17 @@ def main():
             all_jobs_map[key] = job
 
         progress = load_progress(PROGRESS_FILE)
+
+        # Filter out already-generated jobs so we always get N new ones
+        good_ungenerated = []
+        for r in good:
+            job_key = sanitize_folder_name(f"{r['company']}_{r['title']}")
+            if job_key not in progress or progress[job_key].get("status") != "done":
+                good_ungenerated.append(r)
+        skipped_old = len(good) - len(good_ungenerated)
+        if skipped_old:
+            log.info("Skipped %s already-generated jobs, %s remaining", skipped_old, len(good_ungenerated))
+        good = good_ungenerated
 
         if max_jobs and max_jobs < len(good):
             log.info("Limiting to %s jobs (--max-jobs)", max_jobs)
@@ -881,10 +979,11 @@ def main():
     _print_separator("TOTALS")
     all_jobs_count = len(load_json(JOBS_JSON))
     log.info("Jobs in database:         %s", all_jobs_count)
-    log.info("Jobs scored:              %s", len(scored))
-    if scored:
-        avg = sum(r['score'] for r in scored) / len(scored)
-        log.info("Average score:            %.1f/10", avg)
+    scored_count = len(load_json(SCORE_CACHE))
+    log.info("Jobs scored:              %s", scored_count)
+    if good:
+        avg = sum(r['score'] for r in good) / len(good)
+        log.info("Average score (good):     %.1f/10", avg)
     log.info("Jobs above threshold:     %s", len(good))
     log.info("Applications generated:   %s", completed)
 
@@ -895,7 +994,7 @@ def main():
         "date": datetime.date.today().isoformat(),
         "runtime_seconds": round(metrics.total_elapsed(), 1),
         "total_scraped": len(all_fetched_jobs),
-        "total_scored": len(scored),
+        "total_scored": scored_count,
         "recommended": len(good),
         "sources": source_stats,
     }

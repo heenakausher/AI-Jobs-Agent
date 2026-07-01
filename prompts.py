@@ -189,18 +189,28 @@ def detect_profile(job_title: str, job_description: str, category: str = "") -> 
     return candidates[0]
 
 
-def _get_relevant_projects(profile: str, max_projects: int = 4) -> list:
-    """Get relevant projects based on profile."""
-    ai_profiles = ("ai engineer", "agentic ai", "machine learning engineer", "genai", "llm", "data science")
-    if profile in ai_profiles:
-        return PROJECTS_DATA[:max_projects]
-    return PROJECTS_DATA[:max_projects]
+def _rank_projects_by_relevance(projects: list, job_description: str, min_projects: int = 3) -> list:
+    """Sort projects by relevance to the job description. Returns at least min_projects."""
+    if not projects:
+        return []
+    if not job_description:
+        return projects[:max(min_projects, len(projects))]
+
+    jd_lower = job_description.lower()
+
+    def _score(proj):
+        text = f"{proj['title']} {proj['technologies']} {proj['description']} {proj['impact']}"
+        words = set(re.findall(r'[a-zA-Z][a-zA-Z0-9+#.]*', text.lower()))
+        return sum(1 for w in words if w in jd_lower)
+
+    ranked = sorted(projects, key=_score, reverse=True)
+    return ranked[:max(min_projects, len(ranked))]
 
 
-def build_system_prompt(profile: str, cv_text: str) -> str:
+def build_system_prompt(profile: str, cv_text: str, job_description: str = "") -> str:
     """Build profile-specific system prompt with hallucination prevention."""
     profile_config = PROFILES.get(profile, PROFILES["data analyst"])
-    projects = _get_relevant_projects(profile)
+    projects = _rank_projects_by_relevance(PROJECTS_DATA, job_description)
     projects_text = _format_projects_for_prompt(projects)
 
     return f"""You are an expert ATS optimization specialist, professional resume writer, and career coach.

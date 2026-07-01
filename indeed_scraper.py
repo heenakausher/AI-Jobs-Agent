@@ -19,8 +19,8 @@ INDEED_BASE = "https://www.indeed.com"
 class IndeedScraper(BaseScraper):
     """Indeed.com job scraper."""
 
-    def __init__(self) -> None:
-        super().__init__("Indeed")
+    def __init__(self, stop_event: Any = None) -> None:
+        super().__init__("Indeed", stop_event=stop_event)
 
     def search_keyword(
         self,
@@ -225,8 +225,8 @@ class IndeedScraper(BaseScraper):
         return text
 
 
-def fetch_all(job_age_hours: int = 24) -> List[Dict[str, Any]]:
-    scraper = IndeedScraper()
+def fetch_all(job_age_hours: int = 24, stop_event: Any = None) -> List[Dict[str, Any]]:
+    scraper = IndeedScraper(stop_event=stop_event)
     return scraper.search_all_variants(job_age_hours=job_age_hours)
 
 

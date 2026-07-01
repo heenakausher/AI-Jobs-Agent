@@ -36,6 +36,7 @@
     "Mid level",
     "Experienced"
   ],
+  "target_jobs_count": 50,
   "posted_within_hours": 24,
   "max_pages_per_search": 3,
   "max_workers": 10,

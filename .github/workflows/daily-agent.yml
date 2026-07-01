@@ -79,19 +79,14 @@ jobs:
           echo "First 10 lines:"
           head -10 enhanced_cv.txt
 
-      # ── Scrape all job sources in parallel ──────────────────────────
-      - name: Scrape all job sources (parallel)
-        run: python main.py --parallel --skip-score --skip-generate
-        continue-on-error: true
-
-      # ── Auto-score new jobs ─────────────────────────────────────────
-      - name: Auto-score new jobs
-        run: python auto_scorer.py
+      # ── Scrape & score job sources (parallel, stops at 50 good jobs) ─
+      - name: Scrape & score job sources (parallel)
+        run: python main.py --parallel --skip-generate
         continue-on-error: true
 
       # ── Generate CVs, Cover Letters & upload to Google Sheets ───────
       - name: Generate CVs and Cover Letters
-        run: python main.py --skip-scrape --skip-score --max-jobs 300 --workers 3
+        run: python main.py --skip-scrape --skip-score --max-jobs 50 --workers 3
         continue-on-error: true
 
       # ── Cache: save updated cache files ─────────────────────────────

@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from utils.base_scraper import BaseScraper
 from utils.playwright_helpers import fetch_page_html
@@ -16,8 +16,8 @@ log = logging.getLogger("agent")
 class NaukriScraper(BaseScraper):
     """Naukri.com job scraper."""
 
-    def __init__(self) -> None:
-        super().__init__("Naukri")
+    def __init__(self, stop_event: Any = None) -> None:
+        super().__init__("Naukri", stop_event=stop_event)
 
     def search_keyword(
         self,
@@ -152,8 +152,8 @@ class NaukriScraper(BaseScraper):
         return jobs
 
 
-def fetch_all(job_age_hours: int = 24) -> List[Dict[str, Any]]:
-    scraper = NaukriScraper()
+def fetch_all(job_age_hours: int = 24, stop_event: Any = None) -> List[Dict[str, Any]]:
+    scraper = NaukriScraper(stop_event=stop_event)
     return scraper.search_all_variants(job_age_hours=job_age_hours)
 
 
